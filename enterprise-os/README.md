@@ -1,4 +1,4 @@
-# 企业OS 基础版 · 开发交付包
+# qyos · 企业OS 基础版
 
 日期：2026-11-11。对应方案文档「企业OS 基础版方案」。本版已按融合审查修复，各上游行为都对照源码核对过。
 
@@ -32,7 +32,7 @@ Jimage 前端 ── 员工自己的 JAPI Key（只在内存，不落盘）─�
 
 ## 部署顺序
 
-以下命令都在服务器上、从本仓库检出后执行：`git clone https://github.com/Jj225714/jpmamoru.git && cd jpmamoru && git checkout feat/enterprise-os`。
+以下命令都在服务器上、从本仓库检出后执行：`git clone https://github.com/Jj225714/qyos.git && cd qyos`（`main` 分支）。
 
 1. **JAPI**：JAPI 源码不在本仓库，把 `enterprise-os/japi-patch` 的补丁合进你们的 JAPI 源码（见其 README），跑测试后发布。
    - 后台建一把 scoped 管理员密钥，权限见 `enterprise-os/japi-patch/README.md`，`allowed_ips` 只填 os-bridge 所在主机。

@@ -1,3 +1,5 @@
+> 本仓库即 **qyos**（企业OS）：在 Jimage 源码基础上加入 Jadmin、os-bridge 与部署模板。企业OS 的总览与部署顺序见 [enterprise-os/README.md](enterprise-os/README.md)。
+
 # JimageAI 生图项目（jpmamoru）
 
 ## 项目范围与来源
