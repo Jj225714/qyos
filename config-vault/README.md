@@ -15,6 +15,29 @@ node admin-users.mjs --file /private/config-vault-admins.json --action revoke --
 
 反向代理整个 `/api/config-vault/`，请求体上限建议 30MB、读取超时 60 秒；保留 `Host`、`Origin`、`X-Config-User` 和 Cookie。若配置了 `proxy_pass_request_headers off`，必须逐项显式转发这些头以及 `Content-Type`、`Sec-Fetch-Site`。不能沿用旧 256KB 请求限制，否则附件会被拦截。API 仍仅监听本机。不要把保险库存储目录放进网页静态目录。部署时须同步本目录的 `server.mjs`、`settings.mjs`、`validation.mjs` 和 `commerce-policy-schema.json`。
 
+## 企业账号登录（可选）
+
+接入企业OS后，员工可用飞书 / 企业微信 / 钉钉（经 Casdoor）登录，不再需要 JAPI 密码。启动时追加 `--sso-config /private/config-vault-sso.json`（格式见 `sso-config.example.json`），未提供该参数时行为与原来完全相同。
+
+配置项（`sso-config.example.json`）：
+
+- `bridge.baseUrl`：os-bridge 内部接口地址，默认 `http://127.0.0.1:3291`（os-bridge 的独立内部端口，不是对外的 3290）。所有请求带 `x-internal-token`（取自 `bridge.tokenFile`）。
+- `bridge.japiInstance`（**必填**）：必须与 os-bridge 配置 `japi.instance` 完全相同。保险库只按 JAPI 数字用户 ID 区分账号（个人配置 `user-<id>`、素材、团队成员、管理员名单、relay 任务），所以**只有当 os-bridge 连接的 JAPI 与本服务 `--auth-base` 是同一个 Sub2API 实例时才能这样配置**；指向不同实例会导致 ID 撞号、员工看到别人的数据。保险库在每次 `/internal/me` 与 `/internal/users/:id` 的应答中校验 `instance`，不一致即拒绝 SSO（503）并记录一条不含身份和密钥的日志。缺失或仍是 `<...>` 占位值时服务拒绝启动。
+- `sessionMaxHours`：SSO 会话的绝对时长上限，默认 12，最大 168。到期后须重新企业登录（不随 Casdoor 会话结束，也不续期）；调低后对已签发的会话立即生效。密码登录会话仍为 7 天。
+- `managedChannel`：托管渠道的名称、地址和模型。`models` 须按网关实际提供的模型名填写；示例只列出图片模型，需要文本模型时自行追加 `{ "name": "实际模型名", "capability": "text" }`。名称形如 `<...>` 的占位值会被忽略并记录日志，不会下发给前端。
+
+流程：
+
+- `GET /oidc/start?return=/image`：跳转 Casdoor（授权码 + PKCE）。state 存入 `oidc/` 子目录下的加密一次性记录，并用 `Path=/api/config-vault/oidc` 的 Lax Cookie 绑定当前浏览器。未被消费的过期记录在启动时和之后的 start 请求中（至多每分钟一次、每次至多扫描 1000 个文件）按文件时间清理。
+  - start 是从站内页面发起的同站顶层导航，会带上 SameSite=Strict 的会话 Cookie；此时吊销该浏览器出示的旧会话并清除其 Cookie（跨站回调带不上这些 Cookie，无法在回调时吊销）。
+  - 授权地址带 `provider_hint`，值取 os-bridge `GET /internal/config` 返回的 `loginProvider.name`，缓存 5 分钟，以跳过 Casdoor 的 IM 选择页；取不到时（失败缓存 1 分钟）不带该参数，不影响登录。
+- `GET /oidc/callback`：校验 state、换取 access token，交给 os-bridge `/internal/me` 映射到 JAPI 用户，签发与密码登录相同的两个会话 Cookie，然后回到 `return` 指定的站内路径。失败时跳回 `/#server-config-sso=failed|unavailable`。
+- 会话仍以 **JAPI 用户 ID** 为主体，已有个人配置、素材库、团队成员和任务不需要迁移。SSO 会话不保存 JAPI 令牌，每 60 秒经 os-bridge `/internal/users/:id` 复核账号状态；员工在 JAPI 停用，或在 Casdoor 被禁用/删除后，下一次复核即失效。
+- `GET /session` 对 SSO 会话返回 `user.managed: true`；`GET /managed-channel` 返回 `infinite-canvas-channel` v1 渠道文件，内含该员工自己的 JAPI Key。前端以固定 id `managed-enterprise` 单独保存该渠道，不与同地址的手填渠道合并；仅在首次加入且员工还没有对应默认模型时设置默认模型。
+- 托管渠道及其 Key 只在内存中：不写入个人配置同步、团队发布、配置导出、迁移备份或浏览器本地存储（保险库也会在保存个人配置时剔除该 id 的渠道）。每次登录或会话恢复时重新从 `/managed-channel` 获取；会话失效（401）、复核停用或退出登录时从本地配置移除。
+- Casdoor 中 jimage 应用的回调地址填 `https://<站点>/api/config-vault/oidc/callback`。前端运行时配置加 `enterpriseSsoEnabled: true` 后显示登录按钮（可用 `enterpriseSsoLabel` 改文字）。
+- 反向代理需放行 `/api/config-vault/oidc/` 的 GET 顶层跳转（不带 Origin 头），其余规则不变。
+
 ## 接口
 
 - `GET /settings`：schemaVersion=2、当前账号、manageTeam 权限、personal/team；管理员另获 draft。

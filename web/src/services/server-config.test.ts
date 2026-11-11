@@ -8,9 +8,29 @@ const fixtures = vi.hoisted(() => ({
     hydrate: vi.fn(async () => {}),
     backups: new Map<string, string>(),
     storeBackup: vi.fn(async (key: string, value: string) => { fixtures.backups.set(key, value); }),
+    // Minimal live config store: the managed channel is added, restored and removed through it.
+    aiStore: (() => {
+        type Channel = { id: string; baseUrl: string; apiKey: string; [key: string]: unknown };
+        type State = { config: { channels: Channel[]; [key: string]: unknown } };
+        let state: State = { config: { channels: [] } };
+        const listeners = new Set<(next: State, prev: State) => void>();
+        return {
+            getState: () => state,
+            setState: (patch: Partial<State>) => { const prev = state; state = { ...state, ...patch }; listeners.forEach((listener) => listener(state, prev)); },
+            subscribe: (listener: (next: State, prev: State) => void) => { listeners.add(listener); return () => listeners.delete(listener); },
+            reset: () => { state = { config: { channels: [] } }; listeners.clear(); },
+        };
+    })(),
 }));
 vi.mock("@/lib/localforage-storage", () => ({ localForageStorage: { getItem: async (key: string) => fixtures.backups.get(key) ?? null, setItem: (key: string, value: string) => fixtures.storeBackup(key, value), removeItem: async (key: string) => { fixtures.backups.delete(key); } } }));
-vi.mock("@/stores/use-config-store", () => ({ normalizePersonalConfig: (value: unknown) => value }));
+vi.mock("@/stores/use-config-store", () => ({ normalizePersonalConfig: (value: unknown) => value, useConfigStore: fixtures.aiStore }));
+// Real merge semantics are covered in channel-config-file.test.ts; here only the fixed id matters.
+vi.mock("./channel-config-file", () => ({
+    applyManagedChannelFile: (config: { channels: { id: string }[] }, file: { channel?: { apiKey?: unknown } }) => {
+        if (typeof file?.channel?.apiKey !== "string") throw new Error("invalid");
+        return { ...config, channels: [...config.channels.filter((c) => c.id !== "managed-enterprise"), { ...file.channel, id: "managed-enterprise" }] };
+    },
+}));
 vi.mock("./settings-data", () => ({
     waitForSettingsHydration: () => fixtures.hydrate(),
     captureLocalPersonalSettings: () => fixtures.personal,
@@ -41,6 +61,7 @@ beforeEach(async () => {
     fixtures.backups.clear();
     fixtures.storeBackup.mockReset().mockImplementation(async (key, value) => { fixtures.backups.set(key, value); });
     fixtures.listener = () => {};
+    fixtures.aiStore.reset();
     const values = new Map<string, string>();
     vi.stubGlobal("localStorage", { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) });
     target = new EventTarget();
@@ -362,4 +383,115 @@ it("refreshes team rules without canceling the pending save or replacing dirty p
     expect(puts).toHaveLength(1);
     expect(JSON.parse(puts[0][1]!.body as string)).toMatchObject({ revision: 3, value: { config: { apiKey: "pending-personal-key" } } });
     expect(service.useServerConfigStore.getState()).toMatchObject({ revision: 4, teamRevision: 8, dirty: false });
+});
+
+const managedUser = { ...user, managed: true };
+const managedFile = (apiKey = "sk-own") => ({ app: "infinite-canvas-channel", version: 1, channel: { name: "企业模型网关", baseUrl: "https://llm.example/v1", apiKey, models: [] } });
+const channelIds = () => fixtures.aiStore.getState().config.channels.map((channel) => channel.id);
+function managedFetch(apiKey = "sk-own") {
+    const mock = vi.fn(async (url: string, options?: RequestInit) => {
+        if (url.endsWith("/session")) return reply({ user: managedUser });
+        if (url.endsWith("/managed-channel")) return reply(managedFile(apiKey));
+        if (url.endsWith("/logout")) return reply(null, 204);
+        if (url.endsWith("/versions")) return reply({ user: managedUser, personal: 3, team: 2, permissions: { manageTeam: true } });
+        if (options?.method === "PUT") return reply({ revision: 4, savedAt: "2026-09-30T00:00:01Z", value: JSON.parse(options.body as string).value });
+        return reply(envelope(remotePersonal, 3, managedUser));
+    });
+    vi.stubGlobal("fetch", mock);
+    return mock;
+}
+
+it("enterprise SSO accounts fetch their managed channel on every session restore, under its own id", async () => {
+    const manual = { id: "mine", baseUrl: "https://llm.example/v1", apiKey: "sk-manual" };
+    fixtures.aiStore.setState({ config: { channels: [manual] } });
+    const mock = managedFetch();
+    await service.initializeServerConfiguration();
+    expect(mock.mock.calls.filter(([url]) => String(url).endsWith("/managed-channel"))).toHaveLength(1);
+    expect(fixtures.aiStore.getState().config.channels).toEqual([manual, expect.objectContaining({ id: "managed-enterprise", apiKey: "sk-own" })]);
+    expect(service.useServerConfigStore.getState().user).toEqual(managedUser);
+
+    // A page reload starts without the channel (never persisted) and fetches it again.
+    service.disposeServerConfiguration();
+    vi.resetModules();
+    service = await import("./server-config");
+    fixtures.aiStore.setState({ config: { channels: [manual] } });
+    const again = managedFetch("sk-rotated");
+    await service.initializeServerConfiguration();
+    expect(again.mock.calls.filter(([url]) => String(url).endsWith("/managed-channel"))).toHaveLength(1);
+    expect(fixtures.aiStore.getState().config.channels.find((channel) => channel.id === "managed-enterprise")?.apiKey).toBe("sk-rotated");
+});
+
+it("settings applied from the server keep the session's managed channel", async () => {
+    managedFetch();
+    await service.initializeServerConfiguration();
+    // Server / team settings replace the whole channel list; the managed channel is put back from memory.
+    fixtures.aiStore.setState({ config: { channels: [{ id: "team", baseUrl: "https://team.test", apiKey: "team-key" }] } });
+    expect(channelIds()).toEqual(["team", "managed-enterprise"]);
+});
+
+it("a 401 from the vault removes the managed channel", async () => {
+    const mock = managedFetch();
+    await service.initializeServerConfiguration();
+    expect(channelIds()).toContain("managed-enterprise");
+    mock.mockImplementation(async () => reply({ error: "Request failed" }, 401));
+    await service.checkServerConfigurationVersions();
+    expect(service.useServerConfigStore.getState()).toMatchObject({ phase: "signed-out", user: null });
+    expect(channelIds()).not.toContain("managed-enterprise");
+    // Nothing re-adds it afterwards.
+    fixtures.aiStore.setState({ config: { channels: [] } });
+    expect(channelIds()).toEqual([]);
+});
+
+it("a 401 on any vault request (for example a disabled employee) removes the managed channel", async () => {
+    const mock = managedFetch();
+    await service.initializeServerConfiguration();
+    mock.mockImplementationOnce(async () => reply({ error: "Request failed" }, 401));
+    await expect(service.apiSettingsRequest("/settings")).rejects.toThrow("登录已失效");
+    expect(channelIds()).not.toContain("managed-enterprise");
+});
+
+it("signing out removes the managed channel", async () => {
+    managedFetch();
+    await service.initializeServerConfiguration();
+    expect(channelIds()).toContain("managed-enterprise");
+    await service.logoutServerConfiguration();
+    expect(channelIds()).not.toContain("managed-enterprise");
+    fixtures.aiStore.setState({ config: { channels: [] } });
+    expect(channelIds()).toEqual([]);
+});
+
+it("operation guards accept requests that use the managed channel", async () => {
+    managedFetch();
+    await service.initializeServerConfiguration();
+    const managed = fixtures.aiStore.getState().config.channels.find((channel) => channel.id === "managed-enterprise")!;
+    fixtures.personal.config.channels = [];
+    expect(() => service.captureSettingsSessionGuard({ apiKey: "sk-own" })).not.toThrow();
+    expect(() => service.captureSettingsSessionGuard({ channels: [managed as never] })).not.toThrow();
+});
+
+it("password accounts never request a managed channel, and a failing channel does not block sign-in", async () => {
+    const fetch = standardFetch();
+    await service.initializeServerConfiguration();
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith("/managed-channel"))).toBe(false);
+
+    service.disposeServerConfiguration();
+    vi.resetModules();
+    service = await import("./server-config");
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+        if (url.endsWith("/session")) return reply({ user: managedUser });
+        if (url.endsWith("/managed-channel")) return reply({ error: "Request failed" }, 503);
+        return reply(envelope(remotePersonal, 3, managedUser));
+    }));
+    await service.initializeServerConfiguration();
+    expect(service.useServerConfigStore.getState().user).toEqual(managedUser);
+    expect(channelIds()).toEqual([]);
+});
+
+it("reports a failed enterprise sign-in returned in the URL hash", async () => {
+    const fetch = standardFetch();
+    (window as unknown as { location: { hash: string } }).location.hash = "#server-config-sso=failed";
+    await service.initializeServerConfiguration();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(service.useServerConfigStore.getState()).toMatchObject({ phase: "signed-out", user: null });
+    expect(service.useServerConfigStore.getState().message).toContain("企业账号登录失败");
 });

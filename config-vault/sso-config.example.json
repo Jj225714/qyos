@@ -1,0 +1,21 @@
+{
+    "oidc": {
+        "issuer": "https://sso.jpmamoru.com",
+        "clientId": "<Casdoor 中 jimage 应用的 Client ID>",
+        "clientSecretFile": "/private/config-vault-oidc.secret",
+        "scope": "openid profile email"
+    },
+    "bridge": {
+        "baseUrl": "http://127.0.0.1:3291",
+        "japiInstance": "<与 os-bridge 配置 japi.instance 相同的值>",
+        "tokenFile": "/private/os-bridge-internal.token"
+    },
+    "sessionMaxHours": 12,
+    "managedChannel": {
+        "name": "企业模型网关",
+        "baseUrl": "https://llm.zhitouzhuan.com/v1",
+        "models": [
+            { "name": "gpt-image-2", "capability": "image" }
+        ]
+    }
+}

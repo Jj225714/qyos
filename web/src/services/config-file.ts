@@ -5,6 +5,7 @@ import { useConfigStore, normalizePersonalConfig, type AiConfig, type WebdavSync
 import { usePromptSourceStore, type PromptSourceSchedule } from "@/stores/use-prompt-source-store";
 import type { PromptSource } from "@/services/api/prompt-source-presets";
 import { mergeChannelConfigFile } from "./channel-config-file";
+import { withoutManagedChannel } from "@/lib/managed-channel";
 
 type AppConfigFile = {
     app: "infinite-canvas";
@@ -21,7 +22,8 @@ type AppConfigFile = {
 export function exportAppConfig() {
     const { config, webdav } = useConfigStore.getState();
     const { sources, schedule } = usePromptSourceStore.getState();
-    const data: AppConfigFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), config, webdav, promptSources: { sources, schedule } };
+    // The enterprise-managed channel carries a per-session key and is never exported.
+    const data: AppConfigFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), config: withoutManagedChannel(config), webdav, promptSources: { sources, schedule } };
     saveAs(new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" }), "infinite-canvas-config.json");
 }
 

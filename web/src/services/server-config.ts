@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { getServerConfigEnabled } from "@/constant/runtime-config";
-import { normalizePersonalConfig, type AiConfig } from "@/stores/use-config-store";
+import { normalizePersonalConfig, useConfigStore, type AiConfig } from "@/stores/use-config-store";
+import { applyManagedChannelFile } from "./channel-config-file";
+import { isManagedChannel, withoutManagedChannel } from "@/lib/managed-channel";
 import { localForageStorage } from "@/lib/localforage-storage";
 import { registerSettingsSessionGuard } from "./settings-readiness";
 import type { PersonalSettings, SettingsEnvelope, SettingsSection, SettingsUser, SettingsVersions, TeamSettings, SettingsAsset } from "@/types/settings-sync";
@@ -48,6 +50,23 @@ const current = (requestEpoch: number) => requestEpoch === epoch;
 function ensureCurrent(requestEpoch: number) { if (!current(requestEpoch)) throw new StaleSessionError(); }
 function cancelPending() { if (pending) clearTimeout(pending); pending = undefined; }
 
+/** Last managed channel file of the current SSO session: memory only, never persisted. */
+let managedChannelFile: unknown = null;
+/** Ends the managed channel: forgets the cached file first so nothing re-adds it, then removes it from the live config. */
+function dropManagedChannel() {
+    managedChannelFile = null;
+    const config = useConfigStore.getState().config;
+    if (config?.channels?.some(isManagedChannel)) useConfigStore.setState({ config: withoutManagedChannel(config) });
+}
+/** Settings applied from the server, team or a file replace the channel list; put the session's managed channel back. */
+function restoreManagedChannel() {
+    if (!managedChannelFile || !useServerConfigStore.getState().user?.managed) return;
+    const config = useConfigStore.getState().config;
+    if (!config || config.channels?.some(isManagedChannel)) return;
+    try { useConfigStore.setState({ config: applyManagedChannelFile(config, managedChannelFile, { setDefaults: false }) }); }
+    catch { managedChannelFile = null; }
+}
+
 /** Every authenticated write binds to the identity observed before the request. */
 export async function apiSettingsRequest<T>(path: string, method = "GET", body?: unknown): Promise<T> {
     const requestEpoch = epoch;
@@ -68,6 +87,8 @@ export async function apiSettingsRequest<T>(path: string, method = "GET", body?:
     const response = await request;
     ensureCurrent(requestEpoch);
     if (!response.ok) {
+        // Any rejected session ends the employee's managed channel at once.
+        if (response.status === 401) dropManagedChannel();
         let message = response.status === 401 ? "登录已失效，请重新登录。" : response.status === 403 ? "当前账号没有此配置的管理权限。" : response.status === 409 ? "服务器配置已在其他设备更新，请比较本机与服务器配置后重新读取。" : response.status === 422 ? "配置或附件不完整，请检查后重试。" : response.status === 429 ? "请求过于频繁，请稍后再试。" : "服务器配置读取或保存失败，当前浏览器配置仍保留，请重试。";
         if (response.status === 422) {
             const detail: unknown = await response.json().catch(() => null);
@@ -88,6 +109,7 @@ function failure(error: unknown, requestEpoch: number) {
     if (e.status === 401) {
         loaded = false;
         epoch++;
+        dropManagedChannel();
         useServerConfigStore.setState({ user: null, phase: "signed-out", manageTeam: false, serverPersonal: null, serverTeam: null, teamDraft: null, migrationCandidate: null, message: e.message });
     } else useServerConfigStore.setState({ phase: e.status === 409 ? "conflict" : "error", message: e.message });
 }
@@ -121,6 +143,7 @@ async function adoptUser(user: SettingsUser, requestEpoch: number) {
     const previous = useServerConfigStore.getState().user;
     const changed = (previous && previous.id !== user.id) || (owner && owner !== String(user.id));
     if (changed) {
+        dropManagedChannel();
         useServerConfigStore.setState({ migrationCandidate: null, serverPersonal: null, serverTeam: null, teamDraft: null, manageTeam: false, revision: 0, teamRevision: 0, savedAt: null, teamSavedAt: null, lastSyncedAt: null, dirty: false });
         applying++;
         try { await clearPersonalSettings(() => current(requestEpoch)); ensureCurrent(requestEpoch); clearTeamSettings(); }
@@ -278,6 +301,32 @@ export async function checkServerConfigurationVersions() {
     finally { if (current(requestEpoch)) polling = false; }
 }
 
+/**
+ * SSO accounts get their own model-gateway key from the vault on every sign-in and session restore. The channel
+ * uses the fixed id `managed-enterprise`, never merges with channels the user entered, and stays out of browser
+ * storage, server sync and exports. Default models are set only when it is first added and none is configured.
+ */
+async function applyManagedChannel(user: SettingsUser, requestEpoch: number) {
+    if (!user.managed) { dropManagedChannel(); return; }
+    let file: unknown;
+    try { file = await apiSettingsRequest("/managed-channel"); }
+    catch (error) { if (error instanceof StaleSessionError) throw error; if (error instanceof SettingsSyncError && error.status === 401) throw error; return; }
+    ensureCurrent(requestEpoch);
+    try {
+        const config = useConfigStore.getState().config;
+        const next = applyManagedChannelFile(config, file);
+        managedChannelFile = file;
+        if (next !== config) useConfigStore.setState({ config: next });
+    } catch { /* An invalid managed channel must never block sign-in. */ }
+}
+
+/** Leaves for the vault's SSO start page; the vault redirects back here with a session cookie. */
+export function startEnterpriseLogin() {
+    try { localStorage.removeItem(SIGNED_OUT_KEY); } catch { /* storage may be unavailable */ }
+    const back = `${window.location.pathname}${window.location.search}`;
+    window.location.assign(`/api/config-vault/oidc/start?return=${encodeURIComponent(back)}`);
+}
+
 export async function loginServerConfiguration(email: string, password: string) {
     const requestEpoch = ++epoch;
     cancelPending(); loaded = false; polling = false;
@@ -288,6 +337,7 @@ export async function loginServerConfiguration(email: string, password: string) 
         localStorage.removeItem(SIGNED_OUT_KEY);
         await adoptUser(data.user, requestEpoch);
         await readAndApply(requestEpoch);
+        await applyManagedChannel(data.user, requestEpoch);
     } catch (error) { failure(error, requestEpoch); }
 }
 
@@ -295,6 +345,7 @@ export async function logoutServerConfiguration() {
     const requestEpoch = ++epoch;
     cancelPending(); loaded = false; polling = false; baseline = "";
     try { localStorage.setItem(SIGNED_OUT_KEY, "true"); } catch { /* Storage quotas must never prevent credential clearing. */ }
+    dropManagedChannel();
     // Clear immediately: an in-flight save is never allowed to resurrect this account.
     applying++;
     try { await clearPersonalSettings(() => current(requestEpoch)); ensureCurrent(requestEpoch); clearTeamSettings(); }
@@ -317,9 +368,11 @@ export function captureSettingsSessionGuard(config?: Partial<AiConfig>): () => v
     assertSettingsReady();
     const assertCurrentCredentials = () => { if (config) {
         const active = captureLocalPersonalSettings().config;
+        // The managed channel is excluded from captured settings; compare it from the live configuration.
+        const activeChannels = [...(active.channels ?? []), ...(useConfigStore.getState().config?.channels ?? []).filter(isManagedChannel)];
         const credentials = (channels: AiConfig["channels"]) => channels.map(({ id, baseUrl, apiKey, apiFormat, provider }) => ({ id, baseUrl, apiKey, apiFormat, provider: provider ?? "" })).sort((a, b) => a.id.localeCompare(b.id));
-        if (config.channels && JSON.stringify(credentials(config.channels)) !== JSON.stringify(credentials(active.channels ?? []))) throw new Error("模型渠道已随账号或配置变化，请重新发起请求。");
-        if (config.apiKey && config.apiKey !== active.apiKey && !(active.channels ?? []).some((channel) => channel.apiKey === config.apiKey)) throw new Error("模型凭据已变化，请重新发起请求。");
+        if (config.channels && JSON.stringify(credentials(config.channels)) !== JSON.stringify(credentials(activeChannels))) throw new Error("模型渠道已随账号或配置变化，请重新发起请求。");
+        if (config.apiKey && config.apiKey !== active.apiKey && !activeChannels.some((channel) => channel.apiKey === config.apiKey)) throw new Error("模型凭据已变化，请重新发起请求。");
     } };
     assertCurrentCredentials();
     const requestEpoch = epoch;
@@ -366,7 +419,7 @@ export function initializeServerConfiguration() {
         const requestEpoch = epoch;
         await waitForSettingsHydration();
         if (!current(requestEpoch)) return;
-        unsubscribe = subscribePersonalSettings(() => {
+        const stopSettings = subscribePersonalSettings(() => {
             const sync = useServerConfigStore.getState();
             if (!applying && loaded && sync.user) {
                 const dirty = snapshot() !== baseline;
@@ -374,12 +427,21 @@ export function initializeServerConfiguration() {
                 if (["ready", "saving"].includes(sync.phase) && dirty) queueSave();
             }
         });
+        const stopManaged = useConfigStore.subscribe?.((next, prev) => { if (next.config !== prev.config) restoreManagedChannel(); });
+        unsubscribe = () => { stopSettings(); stopManaged?.(); };
         window.addEventListener?.("focus", checkServerConfigurationVersions);
         window.addEventListener?.("online", checkServerConfigurationVersions);
         interval = setInterval(() => { void checkServerConfigurationVersions(); }, 30000);
         try {
             const params = new URLSearchParams(window.location.hash.slice(1));
             const code = params.get("server-config");
+            const ssoError = params.get("server-config-sso");
+            if (ssoError) {
+                params.delete("server-config-sso");
+                window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${params.size ? `#${params}` : ""}`);
+                useServerConfigStore.setState({ ...emptyState, phase: "signed-out", message: ssoError === "unavailable" ? "企业登录服务暂时不可用，请稍后再试。" : "企业账号登录失败或该账号未开通，请联系管理员。" });
+                return;
+            }
             if (code) {
                 params.delete("server-config");
                 window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${params.size ? `#${params}` : ""}`);
@@ -394,6 +456,7 @@ export function initializeServerConfiguration() {
             localStorage.removeItem(SIGNED_OUT_KEY);
             await adoptUser(result.user, requestEpoch);
             await readAndApply(requestEpoch);
+            await applyManagedChannel(result.user, requestEpoch);
         } catch (error) { failure(error, requestEpoch); }
     })();
     return initialized;
@@ -404,6 +467,6 @@ export function disposeServerConfiguration() {
     epoch++; cancelPending(); if (interval) clearInterval(interval); unsubscribe?.();
     window.removeEventListener?.("focus", checkServerConfigurationVersions);
     window.removeEventListener?.("online", checkServerConfigurationVersions);
-    initialized = undefined; loaded = false; polling = false;
+    initialized = undefined; loaded = false; polling = false; managedChannelFile = null;
 }
 

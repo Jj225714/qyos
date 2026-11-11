@@ -11,6 +11,8 @@ type RuntimeConfig = {
     sub2apiModelGatewayEnabled?: boolean;
     gptImageJobsEnabled?: boolean;
     serverConfigEnabled?: boolean;
+    enterpriseSsoEnabled?: boolean;
+    enterpriseSsoLabel?: string;
     commercePolicyCatalogUrl?: string;
     commerceVisualPolicyCatalogUrl?: string;
     commerceCreativePolicyCatalogUrl?: string;
@@ -52,6 +54,15 @@ export function getManagedModelGatewayEnabled(): boolean {
 
 export function getSub2apiModelGatewayEnabled(): boolean {
     return import.meta.env.DEV === true || (typeof window !== "undefined" && window.__RUNTIME_CONFIG__?.sub2apiModelGatewayEnabled === true);
+}
+
+/** Enterprise sign-in (Casdoor via the config vault). Off unless the server's runtime config enables it. */
+export function getEnterpriseSsoEnabled(): boolean {
+    return typeof window !== "undefined" && window.__RUNTIME_CONFIG__?.enterpriseSsoEnabled === true;
+}
+
+export function getEnterpriseSsoLabel(): string {
+    return read("enterpriseSsoLabel", undefined, "企业账号登录（飞书 / 企业微信 / 钉钉）");
 }
 
 export function getGptImageJobsEnabled(): boolean {

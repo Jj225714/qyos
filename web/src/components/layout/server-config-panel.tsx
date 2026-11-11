@@ -1,7 +1,7 @@
 import { Alert, App, Button, Card, Form, Input, Space, Table, Tag } from "antd";
 import { useEffect, useState } from "react";
-import { getServerConfigEnabled } from "@/constant/runtime-config";
-import { initializeServerConfiguration, loginServerConfiguration, logoutServerConfiguration, reloadServerConfiguration, saveServerConfiguration, useServerConfigStore, loadTeamDraft, saveTeamDraft, publishTeamDraft, uploadSettingsAsset } from "@/services/server-config";
+import { getEnterpriseSsoEnabled, getEnterpriseSsoLabel, getServerConfigEnabled } from "@/constant/runtime-config";
+import { initializeServerConfiguration, loginServerConfiguration, startEnterpriseLogin, logoutServerConfiguration, reloadServerConfiguration, saveServerConfiguration, useServerConfigStore, loadTeamDraft, saveTeamDraft, publishTeamDraft, uploadSettingsAsset } from "@/services/server-config";
 import { captureLocalPersonalSettings, captureLocalTeamSettings, prepareTeamSettingsForServer } from "@/services/settings-data";
 import { createCategorySeedPack } from "@/lib/commerce/category-seed";
 import type { PersonalSettings, TeamSettings } from "@/types/settings-sync";
@@ -245,6 +245,14 @@ export function ServerConfigPanel() {
             ) : (
                 <Form layout="vertical" onFinish={() => void submit()} className="max-w-sm">
                     <Alert className="mb-4" type="info" title="登录后恢复配置" />
+                    {getEnterpriseSsoEnabled() ? (
+                        <>
+                            <Button type="primary" block className="mb-3" onClick={startEnterpriseLogin} disabled={busy}>
+                                {getEnterpriseSsoLabel()}
+                            </Button>
+                            <p className="mb-3 text-center text-xs text-stone-500">或使用账号密码登录</p>
+                        </>
+                    ) : null}
                     <Form.Item label="账号邮箱">
                         <Input aria-label="服务器配置账号邮箱" type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} />
                     </Form.Item>

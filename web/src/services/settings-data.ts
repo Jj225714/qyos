@@ -1,5 +1,6 @@
 import i18n, { changeAppLocale } from "@/i18n";
 import { defaultConfig, defaultWebdavSyncConfig, normalizePersonalConfig, useConfigStore } from "@/stores/use-config-store";
+import { withoutManagedChannel } from "@/lib/managed-channel";
 import { useCommerceStore } from "@/stores/use-commerce-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -37,8 +38,9 @@ export function captureLocalPersonalSettings(): PersonalSettings {
     const state = useConfigStore.getState();
     // Keep provider credentials and model bindings in the encrypted server vault
     // so the same account can restore an identical setup in every browser. The
-    // local proxy remains machine-specific and is intentionally excluded.
-    const { managedPrincipalId: _principal, proxyEnabled: _proxyEnabled, proxyUrl: _proxyUrl, ...config } = state.config;
+    // local proxy remains machine-specific and is intentionally excluded. The enterprise-managed
+    // channel is per session (fetched at sign-in) and its key never enters the vault or backups.
+    const { managedPrincipalId: _principal, proxyEnabled: _proxyEnabled, proxyUrl: _proxyUrl, ...config } = withoutManagedChannel(state.config);
     const { lastSyncedAt: _last, ...webdav } = state.webdav;
     const prompts = usePromptSourceStore.getState();
     return clone({
@@ -92,7 +94,8 @@ export function subscribePersonalSettings(listener: () => void) {
 
 export function captureLocalTeamSettings(): TeamSettings {
     const state = useCommerceStore.getState();
-    const config = useConfigStore.getState().config;
+    // Team publishing never carries an employee's managed channel or key.
+    const config = withoutManagedChannel(useConfigStore.getState().config);
     const active = state.policyPacks.find((pack) => pack.id === state.teamPolicyPackId) || state.policyPacks.filter((pack) => pack.status === "published").sort((a, b) => b.version - a.version)[0] || createBuiltInPolicyPack();
     const brands = state.teamPolicyPackId ? state.brands.filter((brand) => state.teamBrandIds.includes(brand.id)) : state.brands.filter((brand) => !brand.id.startsWith("server-brand-") && !brand.id.startsWith("team-brand-"));
     const modelConfig: TeamModelConfig = {

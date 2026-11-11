@@ -1,16 +1,21 @@
 import { createServer } from 'node:http';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import { mkdir, open, opendir, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createSettingsService } from './settings.mjs';
 import { createAssetService } from './asset-service.mjs';
 import { createMembershipService } from './membership-service.mjs';
+import { createEnterpriseSso, OIDC_COOKIE, OIDC_STATE_DIR, STATE_MS } from './enterprise-sso.mjs';
 
 const PREFIX = '/api/config-vault';
 const COOKIE = '__Secure-config_vault';
 const TASK_COOKIE = '__Secure-provider_tasks';
 const SESSION_MS = 7 * 86400000;
+/** Fixed id of the enterprise-managed channel; it carries a per-employee key and is never stored in personal settings. */
+export const MANAGED_CHANNEL_ID = 'managed-enterprise';
+/** Upper bound of pending-login records examined per cleanup pass. */
+const OIDC_PRUNE_SCAN = 1000;
 const hash = value => createHash('sha256').update(value).digest('hex');
 export function encrypt(value, key) {
     const iv = randomBytes(12);
@@ -45,6 +50,8 @@ const fields = new Set('channelMode baseUrl apiKey apiFormat channels model imag
 function cleanConfig(value) {
     if (!plain(value) || !Array.isArray(value.channels) || value.channels.length > 100) throw fault(400);
     const config = {};
+    // The managed channel is fetched per session; it must never be persisted with personal settings.
+    value = { ...value, channels: value.channels.filter(channel => !(plain(channel) && channel.id === MANAGED_CHANNEL_ID)) };
     for (const [name, field] of Object.entries(value)) {
         if (['managedPrincipalId', 'proxyEnabled', 'proxyUrl'].includes(name)) continue;
         if (!fields.has(name)) throw fault(400);
@@ -69,9 +76,10 @@ function cleanConfig(value) {
     return config;
 }
 
-export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchImpl = fetch, adminUsersFile, publicRulesDir, assetQuotaBytes }) {
+export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchImpl = fetch, adminUsersFile, publicRulesDir, assetQuotaBytes, enterpriseSso, ssoRecheckMs = 60000, oidcPruneIntervalMs = 60000 }) {
     const expected = new URL(origin);
     if (expected.origin !== origin || key.length !== 32) throw new Error('Invalid settings');
+    const sso = enterpriseSso ? createEnterpriseSso({ origin, prefix: PREFIX, fetchImpl, ...enterpriseSso }) : null;
     const locks = new Map();
     const rates = new Map();
     const path = name => join(storeDir, `${name}.enc`);
@@ -119,6 +127,19 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
         setSessionCookie(res, id, SESSION_MS / 1000);
         return user;
     }
+    // SSO sessions hold no JAPI tokens: identity is re-checked against JAPI through os-bridge.
+    // They also have an absolute lifetime (sessionMaxHours), after which enterprise login is required again.
+    async function createSsoSession(rawUser, req, res, extraCookies) {
+        const user = validUser(rawUser);
+        await revokePresented(req);
+        const id = randomBytes(32).toString('base64url');
+        const createdAt = Date.now();
+        const lifetime = Math.min(SESSION_MS, sso.sessionMs);
+        await writeEncrypted(path(`session-${hash(id)}`), { kind: 'sso', user, createdAt, expiresAt: createdAt + lifetime, checkedAt: createdAt }, key);
+        setSessionCookie(res, id, Math.floor(lifetime / 1000));
+        res.setHeader('Set-Cookie', [...res.getHeader('Set-Cookie'), ...extraCookies]);
+        return user;
+    }
     function sessionName(req) {
         const ids = presentedIds(req);
         // Cookie headers omit Path: never select the first of ambiguous account cookies.
@@ -133,6 +154,18 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
             if (!session) throw fault(401);
             try {
                 if (session.expiresAt <= Date.now()) throw fault(401);
+                if (session.kind === 'sso') {
+                    if (!sso) throw fault(401);
+                    // Also enforces a lowered sessionMaxHours on sessions issued before the change.
+                    if (!Number.isFinite(session.createdAt) || session.createdAt + sso.sessionMs <= Date.now()) throw fault(401);
+                    if (session.checkedAt + ssoRecheckMs <= Date.now()) {
+                        const current = validUser(await sso.status(session.user.id));
+                        if (String(current.id) !== String(session.user.id) || current.email.toLowerCase() !== session.user.email.toLowerCase()) throw fault(401);
+                        session.checkedAt = Date.now();
+                        await writeEncrypted(path(name), session, key);
+                    }
+                    return { user: session.user, name, expiresAt: session.expiresAt, sso: true };
+                }
                 let refreshed = false;
                 async function refresh() {
                     const auth = await upstream('/auth/refresh', post({ refresh_token: session.auth.refresh_token }));
@@ -168,15 +201,60 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
         if (!record) { if (rates.size >= 10000) throw fault(429); record = { count: 0, until: now + 60000 }; rates.set(ip, record); }
         if (++record.count > 10) throw fault(429);
     }
+    // Pending-login records never consumed (abandoned logins) are removed by file age, a bounded batch per pass.
+    let lastOidcPrune = 0;
+    async function pruneOidcStates() {
+        lastOidcPrune = Date.now();
+        let directory;
+        try { directory = await opendir(join(storeDir, OIDC_STATE_DIR)); } catch { return 0; }
+        let scanned = 0; let removed = 0;
+        try {
+            for await (const entry of directory) {
+                if (++scanned > OIDC_PRUNE_SCAN) break;
+                if (!entry.isFile() || !/^[0-9a-f]{64}\.enc$/.test(entry.name)) continue;
+                const file = join(storeDir, OIDC_STATE_DIR, entry.name);
+                try {
+                    if ((await stat(file)).mtimeMs + STATE_MS < Date.now()) { await unlink(file); removed++; }
+                } catch { /* consumed concurrently */ }
+            }
+        } finally { await directory.close().catch(() => {}); }
+        return removed;
+    }
+    const pruneOidcStatesSoon = () => { if (Date.now() - lastOidcPrune >= oidcPruneIntervalMs) pruneOidcStates().catch(() => {}); };
+    const oidcPruned = sso ? pruneOidcStates().catch(() => 0) : Promise.resolve(0);
     const settings = createSettingsService({ read, write: (name, value) => writeEncrypted(path(name), value, key), locked, body, cleanConfig, adminUsersFile, publicRulesDir });
     const memberships = createMembershipService({ storeDir, read, write: (name, value) => writeEncrypted(path(name), value, key), body });
     const assets = createAssetService({ storeDir, read, write: (name, value) => writeEncrypted(path(name), value, key), body, memberships, quotaBytes: assetQuotaBytes });
-    return async (req, res) => {
+    const handler = async (req, res) => {
         res.setHeader('Cache-Control', 'no-store');
         res.setHeader('Content-Type', 'application/json');
         res.setHeader('X-Content-Type-Options', 'nosniff');
         const send = value => res.end(JSON.stringify(value));
         try {
+            if (sso && req.method === 'GET' && req.headers.host === expected.host && (req.url.startsWith(`${PREFIX}/oidc/start?`) || req.url === `${PREFIX}/oidc/start` || req.url.startsWith(`${PREFIX}/oidc/callback?`))) {
+                // Top-level navigations: no Origin header; protected by state cookie + single-use state record + PKCE.
+                const url = new URL(req.url, origin);
+                res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+                const redirect = (location, cookies = []) => { res.statusCode = 302; res.setHeader('Location', location); if (cookies.length) res.setHeader('Set-Cookie', [...(res.getHeader('Set-Cookie') || []), ...cookies]); res.end(); };
+                const clearState = `${OIDC_COOKIE}=; Path=${PREFIX}/oidc; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+                if (url.pathname === `${PREFIX}/oidc/start`) {
+                    rateLimit(req);
+                    pruneOidcStatesSoon();
+                    // Start is a same-site top-level navigation, so SameSite=Strict session cookies arrive here
+                    // (unlike on the cross-site callback): end the session this browser holds before switching.
+                    if (presentedIds(req).length) { await revokePresented(req); setSessionCookie(res, '', 0); }
+                    const started = await sso.start({ returnTo: url.searchParams.get('return'), write: (name, value) => writeEncrypted(path(name), value, key) });
+                    return redirect(started.location, [started.cookie]);
+                }
+                const cookieState = (req.headers.cookie || '').split(';').map(v => v.trim()).find(v => v.startsWith(`${OIDC_COOKIE}=`))?.slice(OIDC_COOKIE.length + 1);
+                try {
+                    const result = await sso.finish({ query: url.searchParams, cookieState, consume: name => locked(name, async () => { const value = await read(name); await unlink(path(name)).catch(() => {}); return value; }) });
+                    await createSsoSession(result.user, req, res, [clearState]);
+                    return redirect(result.returnTo);
+                } catch (error) {
+                    return redirect(`/#server-config-sso=${error.status === 503 ? 'unavailable' : 'failed'}`, [clearState]);
+                }
+            }
             if (req.headers.host !== expected.host || (req.headers.origin !== origin && !(req.method === 'GET' && !req.headers.origin && req.headers['sec-fetch-site'] === 'same-origin'))) throw fault(403);
             const route = req.url;
             if (req.method === 'POST' && route === `${PREFIX}/login`) {
@@ -220,7 +298,11 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
                     return assets.handle(req, res, session, send);
                 });
             }
-            if (req.method === 'GET' && route === `${PREFIX}/session`) return send({ user: session.user });
+            if (req.method === 'GET' && route === `${PREFIX}/session`) return send({ user: session.sso ? { ...session.user, managed: true } : session.user });
+            if (req.method === 'GET' && route === `${PREFIX}/managed-channel`) {
+                if (!session.sso || !sso) throw fault(404);
+                return send(await sso.channelFile(session.user.id));
+            }
             if (route.startsWith(`${PREFIX}/settings`) || route.startsWith(`${PREFIX}/assets`)) {
                 return await settings.handle(req, res, session, send);
             }
@@ -245,10 +327,20 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
             throw fault(404);
         } catch (error) { if (!res.writableEnded) { res.statusCode = error.status || 500; send({ error: res.statusCode === 409 ? 'Configuration conflict' : res.statusCode === 422 ? error.message : 'Request failed' }); } }
     };
+    // For tests and maintenance: the startup cleanup pass, and a manual trigger.
+    handler.oidcPruned = oidcPruned;
+    handler.pruneOidcStates = pruneOidcStates;
+    return handler;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     const args = Object.fromEntries(Array.from({ length: Math.floor((process.argv.length - 2) / 2) }, (_, index) => process.argv.slice(index * 2 + 2, index * 2 + 4)));
     const key = await readFile(args['--key-file']);
-    createServer(createVaultHandler({ origin: args['--origin'], authBaseUrl: args['--auth-base'], storeDir: args['--store'], key, adminUsersFile: args['--admin-users-file'], publicRulesDir: args['--public-rules-dir'] })).listen(Number(args['--port'] || 3183), '127.0.0.1');
+    // Optional enterprise SSO (Casdoor + os-bridge): enabled only when --sso-config is given.
+    const enterpriseSso = args['--sso-config'] ? await (async () => {
+        const config = JSON.parse(await readFile(args['--sso-config'], 'utf8'));
+        const secret = file => readFile(file, 'utf8').then(v => v.trim());
+        return { oidc: { ...config.oidc, clientSecret: await secret(config.oidc.clientSecretFile) }, bridge: { baseUrl: config.bridge.baseUrl, japiInstance: config.bridge.japiInstance, token: await secret(config.bridge.tokenFile) }, managedChannel: config.managedChannel, sessionMaxHours: config.sessionMaxHours };
+    })() : undefined;
+    createServer(createVaultHandler({ origin: args['--origin'], authBaseUrl: args['--auth-base'], storeDir: args['--store'], key, adminUsersFile: args['--admin-users-file'], publicRulesDir: args['--public-rules-dir'], enterpriseSso })).listen(Number(args['--port'] || 3183), '127.0.0.1');
 }

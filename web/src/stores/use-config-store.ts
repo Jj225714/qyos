@@ -8,6 +8,7 @@ import { withBmModelGateway } from "@/lib/bm-model-gateway";
 import { withSub2apiModelGateway } from "@/lib/sub2api-model-gateway";
 import { isGeneralChannel, type ChannelProvider } from "@/lib/editor-providers";
 import type { EditOperation } from "@/types/image-editor";
+import { MANAGED_CHANNEL_ID, withoutManagedChannel } from "@/lib/managed-channel";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -214,6 +215,12 @@ export function isAiConfigReady(config: AiConfig, model: string) {
     return Boolean(isGeneralChannel(channel) && !model.startsWith("managed::") && model.trim() && channel.baseUrl.trim() && channel.apiKey.trim() && !channel.baseUrl.startsWith("/api/managed"));
 }
 
+/** What the config store writes to browser storage: no request owner, and never the enterprise-managed channel or its key. */
+export function configForBrowserStorage(value: AiConfig): Omit<AiConfig, "managedPrincipalId"> {
+    const { managedPrincipalId: _principal, ...config } = value;
+    return withoutManagedChannel(config);
+}
+
 export const useConfigStore = create<ConfigStore>()(
     persist(
         (set, get) => ({
@@ -253,10 +260,7 @@ export const useConfigStore = create<ConfigStore>()(
             name: CONFIG_STORE_KEY,
             version: 1,
             migrate: (persisted) => persisted as ConfigStore,
-            partialize: (state) => {
-                const { managedPrincipalId: _principal, ...config } = state.config;
-                return { config, webdav: state.webdav };
-            },
+            partialize: (state) => ({ config: configForBrowserStorage(state.config), webdav: state.webdav }),
             merge: (persisted, current) => {
                 const saved = (persisted || {}) as Partial<ConfigStore>;
                 return { ...current, webdav: { ...defaultWebdavSyncConfig, ...(saved.webdav || {}) }, config: normalizePersonalConfig(saved.config || {}) };
@@ -397,6 +401,8 @@ export function normalizeModelOptionValue(value: string | undefined, channels: M
     const decoded = decodeChannelModel(model);
     if (decoded) {
         const channel = channels.find((item) => item.id === decoded.channelId);
+        // The managed channel is never persisted; keep the user's choice until it is fetched again after sign-in.
+        if (!channel && decoded.channelId === MANAGED_CHANNEL_ID) return model;
         return channel && channel.models.some((item) => item.name === decoded.model) ? model : "";
     }
     const channel = channels.find((item) => item.models.some((entry) => entry.name === model)) || channels[0];

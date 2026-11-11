@@ -15,7 +15,8 @@ export type PersonalSettings = {
 };
 export type TeamSettings = { policyPack: PolicyPack; brands: BrandProfile[]; modelConfig?: TeamModelConfig };
 export type SettingsSection<T> = { revision: number; savedAt: string | null; value: T | null };
-export type SettingsUser = { id: number; email: string };
+/** `managed`: signed in through enterprise SSO; the vault then supplies the employee's own model-gateway channel. */
+export type SettingsUser = { id: number; email: string; managed?: boolean };
 export type SettingsEnvelope = {
     schemaVersion: 2;
     user: SettingsUser;

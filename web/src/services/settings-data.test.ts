@@ -36,6 +36,19 @@ beforeEach(() => {
 });
 
 describe("portable settings data", () => {
+    it("never puts the enterprise-managed channel or its key into personal sync, team publishing or backups", () => {
+        state.config.config = { ...state.config.config, channels: [{ id: "old", apiKey: "old-secret" }, { id: "managed-enterprise", apiKey: "sk-managed" }], models: ["old::a", "managed-enterprise::gpt-image-2"], imageModel: "managed-enterprise::gpt-image-2" };
+        const personal = captureLocalPersonalSettings();
+        const team = captureLocalTeamSettings();
+        for (const payload of [personal, team]) expect(JSON.stringify(payload)).not.toContain("sk-managed");
+        expect(personal.config.channels).toEqual([{ id: "old", apiKey: "old-secret" }]);
+        expect(personal.config.models).toEqual(["old::a"]);
+        // The default choice itself is not secret and follows the account.
+        expect(personal.config.imageModel).toBe("managed-enterprise::gpt-image-2");
+        expect(team.modelConfig?.channels).toEqual([{ id: "old", apiKey: "old-secret" }]);
+        // The live configuration is untouched.
+        expect(state.config.config.channels).toHaveLength(2);
+    });
     it("includes provider credentials and model bindings while omitting machine proxy and runtime timestamps", () => {
         const snapshot = captureLocalPersonalSettings();
         expect(snapshot.config.apiKey).toBe("old-key");
