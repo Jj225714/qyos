@@ -1,0 +1,31 @@
+{
+    "listen": { "host": "172.17.0.1", "port": 3290 },
+    "internal": { "host": "127.0.0.1", "port": 3291 },
+    "secretsFile": "/etc/os-bridge/secrets.json",
+    "casdoor": {
+        "issuer": "https://sso.jpmamoru.com",
+        "jwksUrls": [
+            "https://sso.jpmamoru.com/.well-known/jchat/jwks",
+            "https://sso.jpmamoru.com/.well-known/jimage/jwks"
+        ],
+        "audiences": ["<Casdoor 中 jchat 应用的 Client ID>", "<Casdoor 中 jimage 应用的 Client ID>"],
+        "requireEmailVerified": "auto",
+        "organization": "jpmamoru",
+        "clientId": "<Casdoor 中 os-bridge 应用的 Client ID（Secret 写在 secrets.json 的 casdoorClientSecret）>"
+    },
+    "japi": {
+        "baseUrl": "http://127.0.0.1:8080",
+        "instance": "<JAPI 实例标识，例如 japi-prod；与 Jimage 保险库 sso-config 的 bridge.japiInstance 相同>",
+        "keyName": "enterprise-os",
+        "newUser": { "concurrency": 5, "rpmLimit": 60 }
+    },
+    "provisioning": { "requireDepartment": true },
+    "reconcile": { "intervalMs": 600000, "maxDisableRatio": 0.2 },
+    "ragflow": {
+        "mcpUrl": "http://127.0.0.1:9380/api/v1/mcp"
+    },
+    "jadmin": {
+        "url": "http://127.0.0.1:8090"
+    },
+    "departments": []
+}

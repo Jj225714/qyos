@@ -1,0 +1,46 @@
+# Casdoor 身份中心（sso.jpmamoru.com）
+# 用法：见 SETUP.md「0. 启动」。数据库只监听容器网络；Casdoor 只监听本机 8000，由 Nginx 反代并提供 HTTPS。
+services:
+  casdoor:
+    image: casbin/casdoor:${CASDOOR_VERSION:?请在 .env 中填写 Casdoor 版本号}
+    restart: always
+    entrypoint: /bin/sh -c './server --createDatabase=true'
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      RUNNING_IN_DOCKER: "true"
+      driverName: mysql
+      dataSourceName: "casdoor:${CASDOOR_DB_PASSWORD}@tcp(db:3306)/"
+      dbName: casdoor
+      origin: "https://${CASDOOR_DOMAIN}"
+      # 只在首次建库时生效；之后请在后台修改并删除此行。旧版镜像不认这个变量，见 SETUP.md「0. 启动」第 3 步
+      initAdminPassword: "${CASDOOR_INIT_ADMIN_PASSWORD}"
+    volumes:
+      # runmode 只能在 app.conf 里改（环境变量对 beego 的 runmode 无效）；dev 模式会暴露 /swagger
+      - ./app.conf:/conf/app.conf:ro
+    extra_hosts:
+      # 让 built-in 组织的 Webhook 能访问宿主机上的 os-bridge
+      - "host.docker.internal:host-gateway"
+
+  db:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: "${CASDOOR_DB_ROOT_PASSWORD}"
+      MYSQL_DATABASE: casdoor
+      MYSQL_USER: casdoor
+      MYSQL_PASSWORD: "${CASDOOR_DB_PASSWORD}"
+    volumes:
+      - casdoor-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+volumes:
+  casdoor-mysql:

@@ -1,0 +1,23 @@
+[Unit]
+Description=Enterprise OS bridge (Casdoor / JAPI / RAGFlow glue)
+# listen.host is the docker0 bridge address, which exists only once Docker is up.
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=os-bridge
+Group=os-bridge
+WorkingDirectory=/opt/os-bridge
+ExecStart=/usr/bin/node /opt/os-bridge/src/server.mjs --config /etc/os-bridge/config.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/etc/os-bridge
+# secrets.json: owner os-bridge, mode 0600
+
+[Install]
+WantedBy=multi-user.target

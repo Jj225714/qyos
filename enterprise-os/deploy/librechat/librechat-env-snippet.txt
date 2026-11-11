@@ -1,0 +1,34 @@
+# ---- Jchat（LibreChat v0.8.9-rc1）企业OS 相关环境变量，合并进现有 .env ----
+DOMAIN_CLIENT=https://jchat.jpmamoru.com
+DOMAIN_SERVER=https://jchat.jpmamoru.com
+
+# 只允许企业账号（Casdoor OpenID）登录；OpenID 首次登录会自动建号（与 ALLOW_SOCIAL_REGISTRATION 无关）
+ALLOW_EMAIL_LOGIN=false
+ALLOW_REGISTRATION=false
+ALLOW_SOCIAL_LOGIN=true
+ALLOW_SOCIAL_REGISTRATION=false
+# 不要设置 ALLOW_EMAIL_LOGIN_OVERRIDE，它会绕过上面的 ALLOW_EMAIL_LOGIN=false
+
+OPENID_CLIENT_ID=<Casdoor 中 jchat 应用的 Client ID>
+OPENID_CLIENT_SECRET=<Casdoor 中 jchat 应用的 Client Secret>
+OPENID_ISSUER=https://sso.jpmamoru.com
+OPENID_SESSION_SECRET=<openssl rand -hex 32>
+OPENID_SCOPE="openid profile email"
+OPENID_CALLBACK_URL=/oauth/openid/callback
+OPENID_BUTTON_LABEL=企业账号登录
+OPENID_AUTO_REDIRECT=true
+# 必须为 true：把员工的 Casdoor access token 留在会话里，
+# librechat.yaml 中的 {{LIBRECHAT_OPENID_ACCESS_TOKEN}} 才能解析。此时 Jchat 会话的寿命跟随 Casdoor 令牌
+OPENID_REUSE_TOKENS=true
+
+# 会话不短于 Casdoor 令牌有效期（jchat 应用 Expire in hours=1），否则会话先过期，模型和知识库请求会报 401
+SESSION_EXPIRY=3600000
+
+# 退出时同时结束 Casdoor 会话；否则 OPENID_AUTO_REDIRECT 会让用户点退出后立刻被重新登录。
+# 在 Casdoor jchat 应用里登记退出回跳地址 https://jchat.jpmamoru.com/login
+OPENID_USE_END_SESSION_ENDPOINT=true
+
+# 可选：Langfuse
+# LANGFUSE_PUBLIC_KEY=
+# LANGFUSE_SECRET_KEY=
+# LANGFUSE_BASE_URL=https://langfuse.jpmamoru.com

@@ -1,0 +1,50 @@
+# RAGFlow v1.0.0 端口收紧：所有端口只监听本机。
+# 上游默认把 Elasticsearch、MySQL、MinIO、Kvrocks、NATS、Jaeger 以及 9380/9381 都映射到 0.0.0.0。
+# 用法（在 ragflow/docker 目录）：
+#   docker compose -f docker-compose.yml -f /path/to/docker-compose.ports.yml up -d
+# 需要 Docker Compose v2.24 及以上（支持 !override）。
+services:
+  ragflow-cpu:
+    ports: !override
+      # Web 界面只给知识库管理员用：本机 8081，再由 Nginx + IP 白名单对内网开放（见 SETUP.md）
+      - 127.0.0.1:8081:80
+      - 127.0.0.1:9380:9380
+      # 9381 是 RAGFlow 管理后台 API，只在本机使用
+      - 127.0.0.1:9381:9381
+  es01:
+    ports: !override
+      - 127.0.0.1:${ES_PORT}:9200
+  opensearch01:
+    ports: !override
+      - 127.0.0.1:${OS_PORT}:9201
+  infinity:
+    ports: !override
+      - 127.0.0.1:${INFINITY_THRIFT_PORT}:23817
+      - 127.0.0.1:${INFINITY_HTTP_PORT}:23820
+      - 127.0.0.1:${INFINITY_PSQL_PORT}:5432
+  mysql:
+    ports: !override
+      - 127.0.0.1:${EXPOSE_MYSQL_PORT}:3306
+  minio:
+    ports: !override
+      - 127.0.0.1:${MINIO_PORT}:9000
+      - 127.0.0.1:${MINIO_CONSOLE_PORT}:9001
+  kvrocks:
+    ports: !override
+      - "127.0.0.1:${KVROCKS_PORT:-6379}:6379"
+  jaeger:
+    ports: !override
+      - 127.0.0.1:${JAEGER_OTLP_GRPC_PORT:-4317}:4317
+      - 127.0.0.1:${JAEGER_OTLP_HTTP_PORT:-4318}:4318
+      - 127.0.0.1:${JAEGER_UI_PORT:-16686}:16686
+  nats:
+    ports: !override
+      - 127.0.0.1:${EXPOSE_NATS_PORT:-4222}:4222
+      - 127.0.0.1:${EXPOSE_NATS_MONITORING_PORT:-8222}:8222
+  kibana:
+    ports: !override
+      - 127.0.0.1:${KIBANA_PORT-5601}:5601
+  clickhouse:
+    ports: !override
+      - 127.0.0.1:${EXPOSE_CLICKHOUSE_TCP_PORT:-9900}:9000
+      - 127.0.0.1:${CLICKHOUSE_HTTP_PORT:-8123}:8123

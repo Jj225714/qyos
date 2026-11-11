@@ -1,0 +1,46 @@
+# Jchat（LibreChat）企业OS 配置片段
+# 基于上游 LibreChat v0.8.9-rc1（配置版本 1.3.18）核对。把以下各段合并进你们现有的 librechat.yaml，
+# 不要整体覆盖已有定制。os-bridge 在宿主机 3290 端口，容器内通过 host.docker.internal 访问
+# （LibreChat 的 compose 需保留 extra_hosts: host.docker.internal:host-gateway）。
+version: 1.3.18
+
+endpoints:
+  # 管理员在 yaml 中配置的 baseURL 不受私网拦截，不需要 allowedAddresses
+  custom:
+    - name: '企业模型网关'
+      # 占位值：真正的身份是下面的 X-OS-Access-Token（员工本人的 Casdoor access token）。
+      # os-bridge 校验令牌后换成该员工自己的 JAPI Key，计费和限额落到个人。
+      apiKey: 'os-bridge'
+      baseURL: 'http://host.docker.internal:3290/v1'
+      headers:
+        X-OS-Access-Token: '{{LIBRECHAT_OPENID_ACCESS_TOKEN}}'
+      models:
+        # 必须换成 JAPI 实际开放的模型名。fetch 为 true 时按员工本人从 /v1/models 拉取，失败时回退到 default
+        default: ['<默认对话模型>']
+        fetch: true
+      titleConvo: true
+      # 标题生成也计入员工个人用量，建议用便宜的小模型
+      titleModel: '<便宜的小模型>'
+      modelDisplayLabel: '企业模型网关'
+
+mcpSettings:
+  # MCP 连接默认开启 SSRF 防护，os-bridge 在私网地址，必须放行（格式 host:port）
+  allowedAddresses:
+    - 'host.docker.internal:3290'
+
+mcpServers:
+  enterprise-knowledge:
+    type: streamable-http
+    url: 'http://host.docker.internal:3290/mcp/knowledge'
+    # 用 X-OS-Access-Token 而不是 Authorization：os-bridge 的拒绝只会让这一轮不加载知识库工具，不会让整轮对话失败
+    headers:
+      X-OS-Access-Token: '{{LIBRECHAT_OPENID_ACCESS_TOKEN}}'
+    requiresOAuth: false
+    timeout: 60000
+
+# 可选：LibreChat 内置 Langfuse 追踪（按员工邮箱聚合）
+# langfuse:
+#   trace:
+#     userIdField: email
+#     userMetadataFields: [email, role, provider]
+#     conversationMetadataFields: [conversationId, endpoint, model]

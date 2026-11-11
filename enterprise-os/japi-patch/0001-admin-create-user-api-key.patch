@@ -1,0 +1,1508 @@
+From 43875113b620065d16f58790e6cac8448ea35c81 Mon Sep 17 00:00:00 2001
+From: Enterprise OS <noreply@example.com>
+Date: Wed, 11 Nov 2026 03:08:59 -0800
+Subject: [PATCH 1/2] feat(admin): let admins create an API key for a user
+
+Adds POST /api/v1/admin/users/:id/api-keys so the enterprise OS bridge can
+give each employee a dedicated key without a password login.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/cmd/server/wire_gen.go                |   2 +-
+ .../admin/apikey_create_for_user_test.go      | 117 ++++++++++++++++++
+ .../internal/handler/admin/apikey_handler.go  |  60 ++++++++-
+ .../handler/admin/apikey_handler_test.go      |   2 +-
+ backend/internal/server/routes/admin.go       |   1 +
+ 5 files changed, 177 insertions(+), 5 deletions(-)
+ create mode 100644 backend/internal/handler/admin/apikey_create_for_user_test.go
+
+diff --git a/backend/cmd/server/wire_gen.go b/backend/cmd/server/wire_gen.go
+index 1356765b7..15e7e5013 100644
+--- a/backend/cmd/server/wire_gen.go
++++ b/backend/cmd/server/wire_gen.go
+@@ -263,7 +263,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
+ 	errorPassthroughHandler := admin.NewErrorPassthroughHandler(errorPassthroughService)
+ 	tlsFingerprintProfileHandler := admin.NewTLSFingerprintProfileHandler(tlsFingerprintProfileService)
+ 	pluginHandler := admin.NewPluginHandler(pluginManager)
+-	adminAPIKeyHandler := admin.NewAdminAPIKeyHandler(adminService)
++	adminAPIKeyHandler := admin.NewAdminAPIKeyHandler(adminService, apiKeyService)
+ 	scheduledTestPlanRepository := repository.NewScheduledTestPlanRepository(db)
+ 	scheduledTestResultRepository := repository.NewScheduledTestResultRepository(db)
+ 	scheduledTestService := service.ProvideScheduledTestService(scheduledTestPlanRepository, scheduledTestResultRepository)
+diff --git a/backend/internal/handler/admin/apikey_create_for_user_test.go b/backend/internal/handler/admin/apikey_create_for_user_test.go
+new file mode 100644
+index 000000000..73426fec2
+--- /dev/null
++++ b/backend/internal/handler/admin/apikey_create_for_user_test.go
+@@ -0,0 +1,117 @@
++package admin
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Wei-Shaw/sub2api/internal/service"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++type fakeUserAPIKeyCreator struct {
++	userID int64
++	req    service.CreateAPIKeyRequest
++	err    error
++}
++
++func (f *fakeUserAPIKeyCreator) Create(_ context.Context, userID int64, req service.CreateAPIKeyRequest) (*service.APIKey, error) {
++	if f.err != nil {
++		return nil, f.err
++	}
++	f.userID, f.req = userID, req
++	return &service.APIKey{ID: 77, UserID: userID, Key: "sk-created", Name: req.Name, GroupID: req.GroupID, Status: service.StatusActive}, nil
++}
++
++func setupCreateForUser(adminSvc service.AdminService, creator UserAPIKeyCreator) *gin.Engine {
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	h := &AdminAPIKeyHandler{adminService: adminSvc, keyCreator: creator}
++	router.POST("/api/v1/admin/users/:id/api-keys", h.CreateForUser)
++	return router
++}
++
++func postCreateForUser(router *gin.Engine, path, body string) *httptest.ResponseRecorder {
++	rec := httptest.NewRecorder()
++	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
++	req.Header.Set("Content-Type", "application/json")
++	router.ServeHTTP(rec, req)
++	return rec
++}
++
++func TestAdminAPIKeyHandler_CreateForUser_Success(t *testing.T) {
++	creator := &fakeUserAPIKeyCreator{}
++	router := setupCreateForUser(newStubAdminService(), creator)
++
++	rec := postCreateForUser(router, "/api/v1/admin/users/12/api-keys", `{"name":" enterprise-os ","group_id":3}`)
++
++	require.Equal(t, http.StatusOK, rec.Code)
++	require.Equal(t, int64(12), creator.userID)
++	require.Equal(t, "enterprise-os", creator.req.Name)
++	require.NotNil(t, creator.req.GroupID)
++	require.Equal(t, int64(3), *creator.req.GroupID)
++	var resp struct {
++		Code int `json:"code"`
++		Data struct {
++			Key    string `json:"key"`
++			UserID int64  `json:"user_id"`
++		} `json:"data"`
++	}
++	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
++	require.Equal(t, 0, resp.Code)
++	require.Equal(t, "sk-created", resp.Data.Key)
++	require.Equal(t, int64(12), resp.Data.UserID)
++}
++
++func TestAdminAPIKeyHandler_CreateForUser_ZeroGroupMeansDefault(t *testing.T) {
++	creator := &fakeUserAPIKeyCreator{}
++	router := setupCreateForUser(newStubAdminService(), creator)
++
++	rec := postCreateForUser(router, "/api/v1/admin/users/12/api-keys", `{"name":"k","group_id":0}`)
++
++	require.Equal(t, http.StatusOK, rec.Code)
++	require.Nil(t, creator.req.GroupID)
++}
++
++func TestAdminAPIKeyHandler_CreateForUser_InvalidInput(t *testing.T) {
++	router := setupCreateForUser(newStubAdminService(), &fakeUserAPIKeyCreator{})
++
++	require.Equal(t, http.StatusBadRequest, postCreateForUser(router, "/api/v1/admin/users/abc/api-keys", `{"name":"k"}`).Code)
++	require.Equal(t, http.StatusBadRequest, postCreateForUser(router, "/api/v1/admin/users/0/api-keys", `{"name":"k"}`).Code)
++	require.Equal(t, http.StatusBadRequest, postCreateForUser(router, "/api/v1/admin/users/1/api-keys", `{}`).Code)
++	require.Equal(t, http.StatusBadRequest, postCreateForUser(router, "/api/v1/admin/users/1/api-keys", `{"name":"   "}`).Code)
++	require.Equal(t, http.StatusBadRequest, postCreateForUser(router, "/api/v1/admin/users/1/api-keys", `{bad`).Code)
++}
++
++func TestAdminAPIKeyHandler_CreateForUser_UnknownUser(t *testing.T) {
++	adminSvc := newStubAdminService()
++	adminSvc.getUserErr = service.ErrUserNotFound
++	creator := &fakeUserAPIKeyCreator{}
++	router := setupCreateForUser(adminSvc, creator)
++
++	rec := postCreateForUser(router, "/api/v1/admin/users/99/api-keys", `{"name":"k"}`)
++
++	require.Equal(t, http.StatusNotFound, rec.Code)
++	require.Zero(t, creator.userID)
++}
++
++func TestAdminAPIKeyHandler_CreateForUser_ServiceError(t *testing.T) {
++	router := setupCreateForUser(newStubAdminService(), &fakeUserAPIKeyCreator{err: errors.New("boom")})
++
++	rec := postCreateForUser(router, "/api/v1/admin/users/12/api-keys", `{"name":"k"}`)
++
++	require.Equal(t, http.StatusInternalServerError, rec.Code)
++}
++
++func TestAdminAPIKeyHandler_CreateForUser_NotConfigured(t *testing.T) {
++	router := setupCreateForUser(newStubAdminService(), nil)
++
++	rec := postCreateForUser(router, "/api/v1/admin/users/12/api-keys", `{"name":"k"}`)
++
++	require.Equal(t, http.StatusInternalServerError, rec.Code)
++}
+diff --git a/backend/internal/handler/admin/apikey_handler.go b/backend/internal/handler/admin/apikey_handler.go
+index 5e405bdda..27f740f60 100644
+--- a/backend/internal/handler/admin/apikey_handler.go
++++ b/backend/internal/handler/admin/apikey_handler.go
+@@ -1,7 +1,9 @@
+ package admin
+ 
+ import (
++	"context"
+ 	"strconv"
++	"strings"
+ 
+ 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
+ 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+@@ -10,16 +12,68 @@ import (
+ 	"github.com/gin-gonic/gin"
+ )
+ 
++// UserAPIKeyCreator creates API keys on behalf of a user (implemented by *service.APIKeyService).
++type UserAPIKeyCreator interface {
++	Create(ctx context.Context, userID int64, req service.CreateAPIKeyRequest) (*service.APIKey, error)
++}
++
+ // AdminAPIKeyHandler handles admin API key management
+ type AdminAPIKeyHandler struct {
+ 	adminService service.AdminService
++	keyCreator   UserAPIKeyCreator
+ }
+ 
+ // NewAdminAPIKeyHandler creates a new admin API key handler
+-func NewAdminAPIKeyHandler(adminService service.AdminService) *AdminAPIKeyHandler {
+-	return &AdminAPIKeyHandler{
+-		adminService: adminService,
++func NewAdminAPIKeyHandler(adminService service.AdminService, keyCreator *service.APIKeyService) *AdminAPIKeyHandler {
++	h := &AdminAPIKeyHandler{adminService: adminService}
++	if keyCreator != nil {
++		h.keyCreator = keyCreator
++	}
++	return h
++}
++
++// AdminCreateUserAPIKeyRequest is the body of POST /api/v1/admin/users/:id/api-keys.
++// Enterprise OS (os-bridge) uses it to give each employee a dedicated key without a password login.
++type AdminCreateUserAPIKeyRequest struct {
++	Name    string `json:"name" binding:"required"`
++	GroupID *int64 `json:"group_id"`
++}
++
++// CreateForUser creates an API key owned by the given user.
++// POST /api/v1/admin/users/:id/api-keys
++func (h *AdminAPIKeyHandler) CreateForUser(c *gin.Context) {
++	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
++	if err != nil || userID <= 0 {
++		response.BadRequest(c, "Invalid user ID")
++		return
++	}
++	var req AdminCreateUserAPIKeyRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		response.BadRequest(c, "Invalid request: "+err.Error())
++		return
++	}
++	req.Name = strings.TrimSpace(req.Name)
++	if req.Name == "" || len([]rune(req.Name)) > 100 {
++		response.BadRequest(c, "Invalid request: name must be 1-100 characters")
++		return
++	}
++	if req.GroupID != nil && *req.GroupID <= 0 {
++		req.GroupID = nil
++	}
++	if h.keyCreator == nil {
++		response.InternalError(c, "API key creation is not configured")
++		return
++	}
++	if _, err := h.adminService.GetUser(c.Request.Context(), userID); err != nil {
++		response.ErrorFrom(c, err)
++		return
++	}
++	key, err := h.keyCreator.Create(c.Request.Context(), userID, service.CreateAPIKeyRequest{Name: req.Name, GroupID: req.GroupID})
++	if err != nil {
++		response.ErrorFrom(c, err)
++		return
+ 	}
++	response.Success(c, dto.APIKeyFromService(key))
+ }
+ 
+ // AdminUpdateAPIKeyGroupRequest represents the request to update an API key.
+diff --git a/backend/internal/handler/admin/apikey_handler_test.go b/backend/internal/handler/admin/apikey_handler_test.go
+index 6ac6d52f4..f552871d2 100644
+--- a/backend/internal/handler/admin/apikey_handler_test.go
++++ b/backend/internal/handler/admin/apikey_handler_test.go
+@@ -19,7 +19,7 @@ import (
+ func setupAPIKeyHandler(adminSvc service.AdminService) *gin.Engine {
+ 	gin.SetMode(gin.TestMode)
+ 	router := gin.New()
+-	h := NewAdminAPIKeyHandler(adminSvc)
++	h := NewAdminAPIKeyHandler(adminSvc, nil)
+ 	router.PUT("/api/v1/admin/api-keys/:id", h.UpdateGroup)
+ 	return router
+ }
+diff --git a/backend/internal/server/routes/admin.go b/backend/internal/server/routes/admin.go
+index 51efcd36a..ad31b0e7e 100644
+--- a/backend/internal/server/routes/admin.go
++++ b/backend/internal/server/routes/admin.go
+@@ -310,6 +310,7 @@ func registerUserManagementRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+ 		users.DELETE("/:id", h.Admin.User.Delete)
+ 		users.POST("/:id/balance", h.Admin.User.UpdateBalance)
+ 		users.GET("/:id/api-keys", h.Admin.User.GetUserAPIKeys)
++		users.POST("/:id/api-keys", h.Admin.APIKey.CreateForUser)
+ 		users.GET("/:id/usage", h.Admin.User.GetUserUsage)
+ 		users.GET("/:id/balance-history", h.Admin.User.GetBalanceHistory)
+ 		users.POST("/:id/replace-group", h.Admin.User.ReplaceGroup)
+-- 
+2.56.1.windows.1
+
+
+From 03a2664a58b65a1611148c670a0181b90c4e745e Mon Sep 17 00:00:00 2001
+From: Enterprise OS <noreply@example.com>
+Date: Wed, 11 Nov 2026 09:01:21 -0800
+Subject: [PATCH 2/2] feat(admin): scoped-key permissions and key status
+ endpoint for directory sync
+
+- Register users.create, users.update, users.api_keys.read,
+  users.api_keys.create, api_keys.group.write and api_keys.status.write in
+  the scoped admin key catalog (with zh/en labels).
+- CreateForUser rejects administrator (403 ADMIN_USER_API_KEY_FORBIDDEN)
+  and non-active users (403 USER_NOT_ACTIVE).
+- Add PUT /api/v1/admin/api-keys/:id/status (active|disabled) via the
+  owner-side APIKeyService.Update, which invalidates the auth cache.
+  Expired/quota-exhausted keys cannot be re-enabled (409).
+- Scoped keys cannot create, promote or modify administrators, cannot
+  touch administrator-owned keys, and need users.balance.write to set a
+  balance; user write responses follow read permissions.
+- Explicit audit actions for the new routes; scoped-key audit records
+  carry extra.route_action. Responses (plaintext keys) are never audited.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../admin/apikey_create_for_user_test.go      |  98 ++++++++-
+ .../internal/handler/admin/apikey_handler.go  | 123 ++++++++++-
+ .../handler/admin/apikey_status_test.go       | 191 ++++++++++++++++++
+ .../handler/admin/custom_admin_key_users.go   |  24 +++
+ .../internal/handler/admin/user_handler.go    |  20 +-
+ .../admin/user_handler_scoped_write_test.go   | 113 +++++++++++
+ backend/internal/pkg/adminaccess/catalog.go   |   8 +
+ .../adminaccess/catalog_enterprise_os_test.go |  81 ++++++++
+ .../internal/server/middleware/admin_auth.go  |   7 +
+ .../internal/server/middleware/audit_log.go   |  12 ++
+ .../audit_log_enterprise_os_test.go           | 102 ++++++++++
+ backend/internal/server/routes/admin.go       |   1 +
+ .../custom_admin_key_enterprise_os_test.go    |  96 +++++++++
+ .../src/i18n/locales/en/adminAccessKeys.ts    |  24 +++
+ .../src/i18n/locales/zh/adminAccessKeys.ts    |  24 +++
+ 15 files changed, 903 insertions(+), 21 deletions(-)
+ create mode 100644 backend/internal/handler/admin/apikey_status_test.go
+ create mode 100644 backend/internal/handler/admin/user_handler_scoped_write_test.go
+ create mode 100644 backend/internal/pkg/adminaccess/catalog_enterprise_os_test.go
+ create mode 100644 backend/internal/server/middleware/audit_log_enterprise_os_test.go
+ create mode 100644 backend/internal/server/routes/custom_admin_key_enterprise_os_test.go
+
+diff --git a/backend/internal/handler/admin/apikey_create_for_user_test.go b/backend/internal/handler/admin/apikey_create_for_user_test.go
+index 73426fec2..17f7f0ab8 100644
+--- a/backend/internal/handler/admin/apikey_create_for_user_test.go
++++ b/backend/internal/handler/admin/apikey_create_for_user_test.go
+@@ -14,13 +14,21 @@ import (
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+-type fakeUserAPIKeyCreator struct {
++type fakeUserAPIKeyService struct {
+ 	userID int64
+ 	req    service.CreateAPIKeyRequest
+ 	err    error
++
++	keys        map[int64]*service.APIKey
++	getErr      error
++	updateErr   error
++	updateCalls int
++	updateID    int64
++	updateUser  int64
++	updateReq   service.UpdateAPIKeyRequest
+ }
+ 
+-func (f *fakeUserAPIKeyCreator) Create(_ context.Context, userID int64, req service.CreateAPIKeyRequest) (*service.APIKey, error) {
++func (f *fakeUserAPIKeyService) Create(_ context.Context, userID int64, req service.CreateAPIKeyRequest) (*service.APIKey, error) {
+ 	if f.err != nil {
+ 		return nil, f.err
+ 	}
+@@ -28,10 +36,35 @@ func (f *fakeUserAPIKeyCreator) Create(_ context.Context, userID int64, req serv
+ 	return &service.APIKey{ID: 77, UserID: userID, Key: "sk-created", Name: req.Name, GroupID: req.GroupID, Status: service.StatusActive}, nil
+ }
+ 
+-func setupCreateForUser(adminSvc service.AdminService, creator UserAPIKeyCreator) *gin.Engine {
++func (f *fakeUserAPIKeyService) GetByID(_ context.Context, id int64) (*service.APIKey, error) {
++	if f.getErr != nil {
++		return nil, f.getErr
++	}
++	key, ok := f.keys[id]
++	if !ok {
++		return nil, service.ErrAPIKeyNotFound
++	}
++	cp := *key
++	return &cp, nil
++}
++
++func (f *fakeUserAPIKeyService) Update(_ context.Context, id int64, userID int64, req service.UpdateAPIKeyRequest) (*service.APIKey, error) {
++	f.updateCalls++
++	f.updateID, f.updateUser, f.updateReq = id, userID, req
++	if f.updateErr != nil {
++		return nil, f.updateErr
++	}
++	key := *f.keys[id]
++	if req.Status != nil {
++		key.Status = *req.Status
++	}
++	return &key, nil
++}
++
++func setupCreateForUser(adminSvc service.AdminService, keySvc UserAPIKeyService) *gin.Engine {
+ 	gin.SetMode(gin.TestMode)
+ 	router := gin.New()
+-	h := &AdminAPIKeyHandler{adminService: adminSvc, keyCreator: creator}
++	h := &AdminAPIKeyHandler{adminService: adminSvc, keyService: keySvc}
+ 	router.POST("/api/v1/admin/users/:id/api-keys", h.CreateForUser)
+ 	return router
+ }
+@@ -44,8 +77,22 @@ func postCreateForUser(router *gin.Engine, path, body string) *httptest.Response
+ 	return rec
+ }
+ 
++type errorBody struct {
++	Code    int    `json:"code"`
++	Message string `json:"message"`
++	Reason  string `json:"reason"`
++}
++
++func decodeErrorBody(t *testing.T, rec *httptest.ResponseRecorder) errorBody {
++	t.Helper()
++	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
++	var body errorBody
++	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
++	return body
++}
++
+ func TestAdminAPIKeyHandler_CreateForUser_Success(t *testing.T) {
+-	creator := &fakeUserAPIKeyCreator{}
++	creator := &fakeUserAPIKeyService{}
+ 	router := setupCreateForUser(newStubAdminService(), creator)
+ 
+ 	rec := postCreateForUser(router, "/api/v1/admin/users/12/api-keys", `{"name":" enterprise-os ","group_id":3}`)
+@@ -69,7 +116,7 @@ func TestAdminAPIKeyHandler_CreateForUser_Success(t *testing.T) {
+ }
+ 
+ func TestAdminAPIKeyHandler_CreateForUser_ZeroGroupMeansDefault(t *testing.T) {
+-	creator := &fakeUserAPIKeyCreator{}
++	creator := &fakeUserAPIKeyService{}
+ 	router := setupCreateForUser(newStubAdminService(), creator)
+ 
+ 	rec := postCreateForUser(router, "/api/v1/admin/users/12/api-keys", `{"name":"k","group_id":0}`)
+@@ -79,7 +126,7 @@ func TestAdminAPIKeyHandler_CreateForUser_ZeroGroupMeansDefault(t *testing.T) {
+ }
+ 
+ func TestAdminAPIKeyHandler_CreateForUser_InvalidInput(t *testing.T) {
+-	router := setupCreateForUser(newStubAdminService(), &fakeUserAPIKeyCreator{})
++	router := setupCreateForUser(newStubAdminService(), &fakeUserAPIKeyService{})
+ 
+ 	require.Equal(t, http.StatusBadRequest, postCreateForUser(router, "/api/v1/admin/users/abc/api-keys", `{"name":"k"}`).Code)
+ 	require.Equal(t, http.StatusBadRequest, postCreateForUser(router, "/api/v1/admin/users/0/api-keys", `{"name":"k"}`).Code)
+@@ -88,20 +135,51 @@ func TestAdminAPIKeyHandler_CreateForUser_InvalidInput(t *testing.T) {
+ 	require.Equal(t, http.StatusBadRequest, postCreateForUser(router, "/api/v1/admin/users/1/api-keys", `{bad`).Code)
+ }
+ 
+-func TestAdminAPIKeyHandler_CreateForUser_UnknownUser(t *testing.T) {
++func TestAdminAPIKeyHandler_CreateForUser_UnknownUserReturnsJSON404(t *testing.T) {
+ 	adminSvc := newStubAdminService()
+ 	adminSvc.getUserErr = service.ErrUserNotFound
+-	creator := &fakeUserAPIKeyCreator{}
++	creator := &fakeUserAPIKeyService{}
+ 	router := setupCreateForUser(adminSvc, creator)
+ 
+ 	rec := postCreateForUser(router, "/api/v1/admin/users/99/api-keys", `{"name":"k"}`)
+ 
+ 	require.Equal(t, http.StatusNotFound, rec.Code)
++	body := decodeErrorBody(t, rec)
++	require.Equal(t, http.StatusNotFound, body.Code)
++	require.Equal(t, "USER_NOT_FOUND", body.Reason)
+ 	require.Zero(t, creator.userID)
+ }
+ 
++func TestAdminAPIKeyHandler_CreateForUser_RejectsInactiveUser(t *testing.T) {
++	adminSvc := newStubAdminService()
++	adminSvc.users = append(adminSvc.users, service.User{ID: 21, Role: service.RoleUser, Status: service.StatusDisabled})
++	creator := &fakeUserAPIKeyService{}
++	router := setupCreateForUser(adminSvc, creator)
++
++	rec := postCreateForUser(router, "/api/v1/admin/users/21/api-keys", `{"name":"k"}`)
++
++	require.Equal(t, http.StatusForbidden, rec.Code)
++	require.Equal(t, "USER_NOT_ACTIVE", decodeErrorBody(t, rec).Reason)
++	require.Zero(t, creator.userID)
++}
++
++func TestAdminAPIKeyHandler_CreateForUser_RejectsAdminUser(t *testing.T) {
++	for _, status := range []string{service.StatusActive, service.StatusDisabled} {
++		adminSvc := newStubAdminService()
++		adminSvc.users = append(adminSvc.users, service.User{ID: 22, Role: service.RoleAdmin, Status: status})
++		creator := &fakeUserAPIKeyService{}
++		router := setupCreateForUser(adminSvc, creator)
++
++		rec := postCreateForUser(router, "/api/v1/admin/users/22/api-keys", `{"name":"k"}`)
++
++		require.Equal(t, http.StatusForbidden, rec.Code, status)
++		require.Equal(t, "ADMIN_USER_API_KEY_FORBIDDEN", decodeErrorBody(t, rec).Reason)
++		require.Zero(t, creator.userID)
++	}
++}
++
+ func TestAdminAPIKeyHandler_CreateForUser_ServiceError(t *testing.T) {
+-	router := setupCreateForUser(newStubAdminService(), &fakeUserAPIKeyCreator{err: errors.New("boom")})
++	router := setupCreateForUser(newStubAdminService(), &fakeUserAPIKeyService{err: errors.New("boom")})
+ 
+ 	rec := postCreateForUser(router, "/api/v1/admin/users/12/api-keys", `{"name":"k"}`)
+ 
+diff --git a/backend/internal/handler/admin/apikey_handler.go b/backend/internal/handler/admin/apikey_handler.go
+index 27f740f60..6060898fe 100644
+--- a/backend/internal/handler/admin/apikey_handler.go
++++ b/backend/internal/handler/admin/apikey_handler.go
+@@ -6,28 +6,42 @@ import (
+ 	"strings"
+ 
+ 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
++	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
++	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+ 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+ 	"github.com/Wei-Shaw/sub2api/internal/service"
+ 
+ 	"github.com/gin-gonic/gin"
+ )
+ 
+-// UserAPIKeyCreator creates API keys on behalf of a user (implemented by *service.APIKeyService).
+-type UserAPIKeyCreator interface {
++// UserAPIKeyService is the part of *service.APIKeyService the admin API key handler uses
++// to create keys for a user and to change a key's status on the owner's behalf.
++type UserAPIKeyService interface {
+ 	Create(ctx context.Context, userID int64, req service.CreateAPIKeyRequest) (*service.APIKey, error)
++	GetByID(ctx context.Context, id int64) (*service.APIKey, error)
++	Update(ctx context.Context, id int64, userID int64, req service.UpdateAPIKeyRequest) (*service.APIKey, error)
+ }
+ 
++var (
++	// ErrAdminUserAPIKeyForbidden 管理员账号的 Key 不能经管理接口代建，避免把管理员身份交给自动化系统。
++	ErrAdminUserAPIKeyForbidden = infraerrors.Forbidden("ADMIN_USER_API_KEY_FORBIDDEN", "cannot create API keys for administrator accounts")
++	// ErrScopedAdminTargetForbidden 受限管理密钥不得管理管理员账号及其 Key。
++	ErrScopedAdminTargetForbidden = infraerrors.Forbidden("SCOPED_ADMIN_TARGET_FORBIDDEN", "scoped admin keys cannot manage administrator accounts or their API keys")
++	// ErrAPIKeyStatusConflict 只有已停用的 Key 可以恢复；过期、额度耗尽等状态须先处理根因。
++	ErrAPIKeyStatusConflict = infraerrors.Conflict("API_KEY_STATUS_CONFLICT", "only disabled API keys can be re-enabled")
++)
++
+ // AdminAPIKeyHandler handles admin API key management
+ type AdminAPIKeyHandler struct {
+ 	adminService service.AdminService
+-	keyCreator   UserAPIKeyCreator
++	keyService   UserAPIKeyService
+ }
+ 
+ // NewAdminAPIKeyHandler creates a new admin API key handler
+-func NewAdminAPIKeyHandler(adminService service.AdminService, keyCreator *service.APIKeyService) *AdminAPIKeyHandler {
++func NewAdminAPIKeyHandler(adminService service.AdminService, keyService *service.APIKeyService) *AdminAPIKeyHandler {
+ 	h := &AdminAPIKeyHandler{adminService: adminService}
+-	if keyCreator != nil {
+-		h.keyCreator = keyCreator
++	if keyService != nil {
++		h.keyService = keyService
+ 	}
+ 	return h
+ }
+@@ -40,6 +54,7 @@ type AdminCreateUserAPIKeyRequest struct {
+ }
+ 
+ // CreateForUser creates an API key owned by the given user.
++// Only active, non-admin users qualify.
+ // POST /api/v1/admin/users/:id/api-keys
+ func (h *AdminAPIKeyHandler) CreateForUser(c *gin.Context) {
+ 	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+@@ -60,15 +75,24 @@ func (h *AdminAPIKeyHandler) CreateForUser(c *gin.Context) {
+ 	if req.GroupID != nil && *req.GroupID <= 0 {
+ 		req.GroupID = nil
+ 	}
+-	if h.keyCreator == nil {
++	if h.keyService == nil {
+ 		response.InternalError(c, "API key creation is not configured")
+ 		return
+ 	}
+-	if _, err := h.adminService.GetUser(c.Request.Context(), userID); err != nil {
++	user, err := h.adminService.GetUser(c.Request.Context(), userID)
++	if err != nil {
+ 		response.ErrorFrom(c, err)
+ 		return
+ 	}
+-	key, err := h.keyCreator.Create(c.Request.Context(), userID, service.CreateAPIKeyRequest{Name: req.Name, GroupID: req.GroupID})
++	if user.IsAdmin() {
++		response.ErrorFrom(c, ErrAdminUserAPIKeyForbidden)
++		return
++	}
++	if !user.IsActive() {
++		response.ErrorFrom(c, service.ErrUserNotActive)
++		return
++	}
++	key, err := h.keyService.Create(c.Request.Context(), userID, service.CreateAPIKeyRequest{Name: req.Name, GroupID: req.GroupID})
+ 	if err != nil {
+ 		response.ErrorFrom(c, err)
+ 		return
+@@ -76,6 +100,72 @@ func (h *AdminAPIKeyHandler) CreateForUser(c *gin.Context) {
+ 	response.Success(c, dto.APIKeyFromService(key))
+ }
+ 
++// AdminUpdateAPIKeyStatusRequest is the body of PUT /api/v1/admin/api-keys/:id/status.
++type AdminUpdateAPIKeyStatusRequest struct {
++	Status string `json:"status" binding:"required,oneof=active disabled"`
++}
++
++// UpdateStatus enables or disables an API key on behalf of its owner.
++// The owner-side update path invalidates the key's auth cache (local L1, Redis, and pub/sub to other instances).
++// PUT /api/v1/admin/api-keys/:id/status
++func (h *AdminAPIKeyHandler) UpdateStatus(c *gin.Context) {
++	keyID, err := strconv.ParseInt(c.Param("id"), 10, 64)
++	if err != nil || keyID <= 0 {
++		response.BadRequest(c, "Invalid API key ID")
++		return
++	}
++	var req AdminUpdateAPIKeyStatusRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		response.BadRequest(c, "Invalid request: status must be active or disabled")
++		return
++	}
++	if h.keyService == nil {
++		response.InternalError(c, "API key management is not configured")
++		return
++	}
++	key, err := h.keyService.GetByID(c.Request.Context(), keyID)
++	if err != nil {
++		response.ErrorFrom(c, err)
++		return
++	}
++	if !h.scopedKeyMayManageOwner(c, key.UserID) {
++		return
++	}
++	if key.Status == req.Status {
++		response.Success(c, dto.APIKeyFromService(key))
++		return
++	}
++	if req.Status == service.StatusActive && key.Status != service.StatusDisabled {
++		response.ErrorFrom(c, ErrAPIKeyStatusConflict)
++		return
++	}
++	status := req.Status
++	updated, err := h.keyService.Update(c.Request.Context(), keyID, key.UserID, service.UpdateAPIKeyRequest{Status: &status})
++	if err != nil {
++		response.ErrorFrom(c, err)
++		return
++	}
++	response.Success(c, dto.APIKeyFromService(updated))
++}
++
++// scopedKeyMayManageOwner 受限管理密钥只能管理普通用户名下的 Key；全权密钥与登录会话不受此限制。
++// 返回 false 时已写入错误响应。
++func (h *AdminAPIKeyHandler) scopedKeyMayManageOwner(c *gin.Context, ownerID int64) bool {
++	if adminaccess.RestrictedFromContext(c.Request.Context()) == nil {
++		return true
++	}
++	owner, err := h.adminService.GetUser(c.Request.Context(), ownerID)
++	if err != nil {
++		response.ErrorFrom(c, err)
++		return false
++	}
++	if owner.IsAdmin() {
++		response.ErrorFrom(c, ErrScopedAdminTargetForbidden)
++		return false
++	}
++	return true
++}
++
+ // AdminUpdateAPIKeyGroupRequest represents the request to update an API key.
+ type AdminUpdateAPIKeyGroupRequest struct {
+ 	GroupID             *int64 `json:"group_id"`               // nil=不修改, 0=解绑, >0=绑定到目标分组
+@@ -97,6 +187,21 @@ func (h *AdminAPIKeyHandler) UpdateGroup(c *gin.Context) {
+ 		return
+ 	}
+ 
++	if adminaccess.RestrictedFromContext(c.Request.Context()) != nil {
++		if h.keyService == nil {
++			response.InternalError(c, "API key management is not configured")
++			return
++		}
++		key, err := h.keyService.GetByID(c.Request.Context(), keyID)
++		if err != nil {
++			response.ErrorFrom(c, err)
++			return
++		}
++		if !h.scopedKeyMayManageOwner(c, key.UserID) {
++			return
++		}
++	}
++
+ 	var resetKey *service.APIKey
+ 	if req.ResetRateLimitUsage != nil && *req.ResetRateLimitUsage {
+ 		resetKey, err = h.adminService.AdminResetAPIKeyRateLimitUsage(c.Request.Context(), keyID)
+diff --git a/backend/internal/handler/admin/apikey_status_test.go b/backend/internal/handler/admin/apikey_status_test.go
+new file mode 100644
+index 000000000..dd8dcd809
+--- /dev/null
++++ b/backend/internal/handler/admin/apikey_status_test.go
+@@ -0,0 +1,191 @@
++package admin
++
++import (
++	"bytes"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
++	"github.com/Wei-Shaw/sub2api/internal/service"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++// withScopedPrincipal 模拟受限管理密钥（adm_sc_…）通过鉴权后的请求上下文。
++func withScopedPrincipal(permissions ...string) gin.HandlerFunc {
++	return func(c *gin.Context) {
++		p := &adminaccess.Principal{KeyID: "scoped", Policy: adminaccess.Policy{GlobalPermissions: permissions}}
++		c.Request = c.Request.WithContext(adminaccess.WithPrincipal(c.Request.Context(), p))
++		c.Next()
++	}
++}
++
++func newStatusKeyService() *fakeUserAPIKeyService {
++	return &fakeUserAPIKeyService{keys: map[int64]*service.APIKey{
++		10: {ID: 10, UserID: 1, Key: "sk-active", Status: service.StatusActive},
++		11: {ID: 11, UserID: 1, Key: "sk-disabled", Status: service.StatusDisabled},
++		12: {ID: 12, UserID: 1, Key: "sk-expired", Status: service.StatusAPIKeyExpired},
++		13: {ID: 13, UserID: 1, Key: "sk-quota", Status: service.StatusAPIKeyQuotaExhausted},
++		20: {ID: 20, UserID: 5, Key: "sk-admin", Status: service.StatusActive},
++	}}
++}
++
++func newStatusAdminService() *stubAdminService {
++	adminSvc := newStubAdminService()
++	adminSvc.users = append(adminSvc.users, service.User{ID: 5, Role: service.RoleAdmin, Status: service.StatusActive})
++	return adminSvc
++}
++
++func setupAPIKeyStatus(adminSvc service.AdminService, keySvc UserAPIKeyService, middlewares ...gin.HandlerFunc) *gin.Engine {
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	router.Use(middlewares...)
++	h := &AdminAPIKeyHandler{adminService: adminSvc, keyService: keySvc}
++	router.PUT("/api/v1/admin/api-keys/:id/status", h.UpdateStatus)
++	router.PUT("/api/v1/admin/api-keys/:id", h.UpdateGroup)
++	return router
++}
++
++func putJSON(router *gin.Engine, path, body string) *httptest.ResponseRecorder {
++	rec := httptest.NewRecorder()
++	req := httptest.NewRequest(http.MethodPut, path, bytes.NewBufferString(body))
++	req.Header.Set("Content-Type", "application/json")
++	router.ServeHTTP(rec, req)
++	return rec
++}
++
++func decodeAPIKeyData(t *testing.T, rec *httptest.ResponseRecorder) (int64, string) {
++	t.Helper()
++	var resp struct {
++		Code int `json:"code"`
++		Data struct {
++			ID     int64  `json:"id"`
++			Status string `json:"status"`
++		} `json:"data"`
++	}
++	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
++	require.Equal(t, 0, resp.Code)
++	return resp.Data.ID, resp.Data.Status
++}
++
++func TestAdminAPIKeyHandler_UpdateStatus_DisableAndEnable(t *testing.T) {
++	keySvc := newStatusKeyService()
++	router := setupAPIKeyStatus(newStatusAdminService(), keySvc)
++
++	rec := putJSON(router, "/api/v1/admin/api-keys/10/status", `{"status":"disabled"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	id, status := decodeAPIKeyData(t, rec)
++	require.Equal(t, int64(10), id)
++	require.Equal(t, service.StatusDisabled, status)
++	require.Equal(t, 1, keySvc.updateCalls)
++	require.Equal(t, int64(10), keySvc.updateID)
++	require.Equal(t, int64(1), keySvc.updateUser, "必须以 Key 所有者身份走 service 更新，才能复用所有权校验与鉴权缓存失效")
++	require.NotNil(t, keySvc.updateReq.Status)
++	require.Equal(t, service.StatusDisabled, *keySvc.updateReq.Status)
++	require.Nil(t, keySvc.updateReq.GroupID)
++	require.Nil(t, keySvc.updateReq.Quota)
++
++	rec = putJSON(router, "/api/v1/admin/api-keys/11/status", `{"status":"active"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	_, status = decodeAPIKeyData(t, rec)
++	require.Equal(t, service.StatusActive, status)
++	require.Equal(t, 2, keySvc.updateCalls)
++}
++
++func TestAdminAPIKeyHandler_UpdateStatus_SameStatusIsNoop(t *testing.T) {
++	keySvc := newStatusKeyService()
++	router := setupAPIKeyStatus(newStatusAdminService(), keySvc)
++
++	rec := putJSON(router, "/api/v1/admin/api-keys/10/status", `{"status":"active"}`)
++
++	require.Equal(t, http.StatusOK, rec.Code)
++	_, status := decodeAPIKeyData(t, rec)
++	require.Equal(t, service.StatusActive, status)
++	require.Zero(t, keySvc.updateCalls)
++}
++
++func TestAdminAPIKeyHandler_UpdateStatus_InvalidInput(t *testing.T) {
++	keySvc := newStatusKeyService()
++	router := setupAPIKeyStatus(newStatusAdminService(), keySvc)
++
++	for _, tc := range []struct{ path, body string }{
++		{"/api/v1/admin/api-keys/abc/status", `{"status":"disabled"}`},
++		{"/api/v1/admin/api-keys/0/status", `{"status":"disabled"}`},
++		{"/api/v1/admin/api-keys/10/status", `{}`},
++		{"/api/v1/admin/api-keys/10/status", `{"status":"expired"}`},
++		{"/api/v1/admin/api-keys/10/status", `{"status":"quota_exhausted"}`},
++		{"/api/v1/admin/api-keys/10/status", `{"status":"ACTIVE"}`},
++		{"/api/v1/admin/api-keys/10/status", `{bad`},
++	} {
++		rec := putJSON(router, tc.path, tc.body)
++		require.Equal(t, http.StatusBadRequest, rec.Code, tc.path+" "+tc.body)
++	}
++	require.Zero(t, keySvc.updateCalls)
++}
++
++func TestAdminAPIKeyHandler_UpdateStatus_NotFound(t *testing.T) {
++	keySvc := newStatusKeyService()
++	router := setupAPIKeyStatus(newStatusAdminService(), keySvc)
++
++	rec := putJSON(router, "/api/v1/admin/api-keys/404/status", `{"status":"disabled"}`)
++
++	require.Equal(t, http.StatusNotFound, rec.Code)
++	require.Equal(t, "API_KEY_NOT_FOUND", decodeErrorBody(t, rec).Reason)
++	require.Zero(t, keySvc.updateCalls)
++}
++
++func TestAdminAPIKeyHandler_UpdateStatus_CannotReviveExpiredOrExhaustedKey(t *testing.T) {
++	keySvc := newStatusKeyService()
++	router := setupAPIKeyStatus(newStatusAdminService(), keySvc)
++
++	for _, path := range []string{"/api/v1/admin/api-keys/12/status", "/api/v1/admin/api-keys/13/status"} {
++		rec := putJSON(router, path, `{"status":"active"}`)
++		require.Equal(t, http.StatusConflict, rec.Code, path)
++		require.Equal(t, "API_KEY_STATUS_CONFLICT", decodeErrorBody(t, rec).Reason)
++	}
++	require.Zero(t, keySvc.updateCalls)
++
++	// 停用不受当前状态限制。
++	rec := putJSON(router, "/api/v1/admin/api-keys/12/status", `{"status":"disabled"}`)
++	require.Equal(t, http.StatusOK, rec.Code)
++	require.Equal(t, 1, keySvc.updateCalls)
++}
++
++func TestAdminAPIKeyHandler_UpdateStatus_NotConfigured(t *testing.T) {
++	router := setupAPIKeyStatus(newStatusAdminService(), nil)
++
++	rec := putJSON(router, "/api/v1/admin/api-keys/10/status", `{"status":"disabled"}`)
++
++	require.Equal(t, http.StatusInternalServerError, rec.Code)
++}
++
++func TestAdminAPIKeyHandler_ScopedKeyCannotManageAdminOwnedKeys(t *testing.T) {
++	keySvc := newStatusKeyService()
++	router := setupAPIKeyStatus(newStatusAdminService(), keySvc, withScopedPrincipal("api_keys.status.write", "api_keys.group.write"))
++
++	rec := putJSON(router, "/api/v1/admin/api-keys/20/status", `{"status":"disabled"}`)
++	require.Equal(t, http.StatusForbidden, rec.Code)
++	require.Equal(t, "SCOPED_ADMIN_TARGET_FORBIDDEN", decodeErrorBody(t, rec).Reason)
++
++	rec = putJSON(router, "/api/v1/admin/api-keys/20", `{"group_id":2}`)
++	require.Equal(t, http.StatusForbidden, rec.Code)
++	require.Equal(t, "SCOPED_ADMIN_TARGET_FORBIDDEN", decodeErrorBody(t, rec).Reason)
++	require.Zero(t, keySvc.updateCalls)
++
++	// 普通用户名下的 Key 照常可管理。
++	rec = putJSON(router, "/api/v1/admin/api-keys/10/status", `{"status":"disabled"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	require.Equal(t, 1, keySvc.updateCalls)
++}
++
++func TestAdminAPIKeyHandler_FullAccessSessionMayManageAdminOwnedKeys(t *testing.T) {
++	keySvc := newStatusKeyService()
++	router := setupAPIKeyStatus(newStatusAdminService(), keySvc)
++
++	rec := putJSON(router, "/api/v1/admin/api-keys/20/status", `{"status":"disabled"}`)
++
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	require.Equal(t, 1, keySvc.updateCalls)
++}
+diff --git a/backend/internal/handler/admin/custom_admin_key_users.go b/backend/internal/handler/admin/custom_admin_key_users.go
+index cd1018702..5102b16ed 100644
+--- a/backend/internal/handler/admin/custom_admin_key_users.go
++++ b/backend/internal/handler/admin/custom_admin_key_users.go
+@@ -5,6 +5,8 @@ import (
+ 
+ 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
+ 	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
++	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
++	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+ 	"github.com/Wei-Shaw/sub2api/internal/service"
+ 	"github.com/gin-gonic/gin"
+ )
+@@ -45,3 +47,25 @@ func adminUserResponse(c *gin.Context, user *service.User) any {
+ 	}
+ 	return out
+ }
++
++// ErrScopedAdminBalanceWriteRequired 受限密钥创建或编辑用户时设置余额，须另行授权 users.balance.write。
++var ErrScopedAdminBalanceWriteRequired = infraerrors.Forbidden("SCOPED_ADMIN_BALANCE_WRITE_REQUIRED", "setting a user balance requires the users.balance.write permission")
++
++// scopedAdminUserWriteAllowed 是受限密钥经 users.create / users.update 写用户时的字段边界：
++// 不能创建或提升管理员、不能修改管理员账号；设置余额另需 users.balance.write。
++// target 为 nil 表示创建。全权密钥与登录会话直接放行。返回 false 时已写入 403。
++func scopedAdminUserWriteAllowed(c *gin.Context, target *service.User, role string, balance *float64) bool {
++	principal := adminaccess.RestrictedFromContext(c.Request.Context())
++	if principal == nil {
++		return true
++	}
++	if role == service.RoleAdmin || (target != nil && target.IsAdmin()) {
++		response.ErrorFrom(c, ErrScopedAdminTargetForbidden)
++		return false
++	}
++	if balance != nil && !slices.Contains(principal.Policy.GlobalPermissions, "users.balance.write") {
++		response.ErrorFrom(c, ErrScopedAdminBalanceWriteRequired)
++		return false
++	}
++	return true
++}
+diff --git a/backend/internal/handler/admin/user_handler.go b/backend/internal/handler/admin/user_handler.go
+index 7dd286b57..aba8a3372 100644
+--- a/backend/internal/handler/admin/user_handler.go
++++ b/backend/internal/handler/admin/user_handler.go
+@@ -293,6 +293,10 @@ func (h *UserHandler) Create(c *gin.Context) {
+ 		return
+ 	}
+ 
++	if !scopedAdminUserWriteAllowed(c, nil, req.Role, req.Balance) {
++		return
++	}
++
+ 	// 创建管理员账号属权限敏感操作：需最近完成 step-up 2FA 验证。
+ 	if req.Role == service.RoleAdmin {
+ 		if !middleware.EnforceStepUp(c, h.totpService, h.userService, h.settingService) {
+@@ -318,7 +322,7 @@ func (h *UserHandler) Create(c *gin.Context) {
+ 		return
+ 	}
+ 
+-	response.Success(c, dto.UserFromServiceAdmin(user))
++	response.Success(c, adminUserResponse(c, user))
+ }
+ 
+ // Update handles updating a user
+@@ -343,6 +347,18 @@ func (h *UserHandler) Update(c *gin.Context) {
+ 		return
+ 	}
+ 
++	// 受限管理密钥（users.update）只能编辑普通用户，不能改角色为管理员，余额另需单独授权。
++	if adminaccess.RestrictedFromContext(c.Request.Context()) != nil {
++		target, err := h.adminService.GetUser(c.Request.Context(), userID)
++		if err != nil {
++			response.ErrorFrom(c, err)
++			return
++		}
++		if !scopedAdminUserWriteAllowed(c, target, req.Role, req.Balance) {
++			return
++		}
++	}
++
+ 	// 把普通用户提升为管理员属权限敏感操作：需最近完成 step-up 2FA 验证。
+ 	// 目标已是管理员时（前端编辑表单总是携带 role）不触发，避免日常编辑被打断。
+ 	if req.Role == service.RoleAdmin {
+@@ -379,7 +395,7 @@ func (h *UserHandler) Update(c *gin.Context) {
+ 		return
+ 	}
+ 
+-	response.Success(c, dto.UserFromServiceAdmin(user))
++	response.Success(c, adminUserResponse(c, user))
+ }
+ 
+ // Delete handles deleting a user
+diff --git a/backend/internal/handler/admin/user_handler_scoped_write_test.go b/backend/internal/handler/admin/user_handler_scoped_write_test.go
+new file mode 100644
+index 000000000..22620246a
+--- /dev/null
++++ b/backend/internal/handler/admin/user_handler_scoped_write_test.go
+@@ -0,0 +1,113 @@
++package admin
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/Wei-Shaw/sub2api/internal/service"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++func setupScopedUserWrites(adminSvc service.AdminService, permissions ...string) *gin.Engine {
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	router.Use(withScopedPrincipal(permissions...))
++	h := NewUserHandler(adminSvc, nil, nil, nil, nil, nil, nil)
++	router.POST("/api/v1/admin/users", h.Create)
++	router.PUT("/api/v1/admin/users/:id", h.Update)
++	return router
++}
++
++func sendUserWrite(router *gin.Engine, method, path, body string) *httptest.ResponseRecorder {
++	rec := httptest.NewRecorder()
++	req := httptest.NewRequest(method, path, strings.NewReader(body))
++	req.Header.Set("Content-Type", "application/json")
++	router.ServeHTTP(rec, req)
++	return rec
++}
++
++func TestScopedUserCreateRejectsAdminAndUnauthorizedBalance(t *testing.T) {
++	router := setupScopedUserWrites(newStatusAdminService(), "users.create")
++
++	rec := sendUserWrite(router, http.MethodPost, "/api/v1/admin/users", `{"email":"a@example.com","password":"secret123","role":"admin"}`)
++	require.Equal(t, http.StatusForbidden, rec.Code)
++	require.Equal(t, "SCOPED_ADMIN_TARGET_FORBIDDEN", decodeErrorBody(t, rec).Reason)
++
++	rec = sendUserWrite(router, http.MethodPost, "/api/v1/admin/users", `{"email":"a@example.com","password":"secret123","balance":10}`)
++	require.Equal(t, http.StatusForbidden, rec.Code)
++	require.Equal(t, "SCOPED_ADMIN_BALANCE_WRITE_REQUIRED", decodeErrorBody(t, rec).Reason)
++
++	router = setupScopedUserWrites(newStatusAdminService(), "users.create", "users.balance.write")
++	rec = sendUserWrite(router, http.MethodPost, "/api/v1/admin/users", `{"email":"a@example.com","password":"secret123","balance":10}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++}
++
++func TestScopedUserCreateResponseFollowsReadPermissions(t *testing.T) {
++	for _, tc := range []struct {
++		permissions []string
++		wantEmail   bool
++	}{
++		{[]string{"users.create"}, false},
++		{[]string{"users.create", "users.read"}, true},
++	} {
++		router := setupScopedUserWrites(newStatusAdminService(), tc.permissions...)
++		rec := sendUserWrite(router, http.MethodPost, "/api/v1/admin/users", `{"email":"new@example.com","password":"secret123","username":"员工"}`)
++		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++		var resp struct {
++			Data map[string]json.RawMessage `json:"data"`
++		}
++		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
++		require.JSONEq(t, `100`, string(resp.Data["id"]))
++		_, hasEmail := resp.Data["email"]
++		require.Equal(t, tc.wantEmail, hasEmail, tc.permissions)
++		require.NotContains(t, resp.Data, "balance")
++		require.NotContains(t, resp.Data, "notes")
++	}
++}
++
++func TestScopedUserUpdateBoundaries(t *testing.T) {
++	router := setupScopedUserWrites(newStatusAdminService(), "users.update")
++
++	// 管理员账号（ID 5）不可被受限密钥修改，哪怕只是改状态。
++	rec := sendUserWrite(router, http.MethodPut, "/api/v1/admin/users/5", `{"status":"disabled"}`)
++	require.Equal(t, http.StatusForbidden, rec.Code)
++	require.Equal(t, "SCOPED_ADMIN_TARGET_FORBIDDEN", decodeErrorBody(t, rec).Reason)
++
++	// 不能把普通用户提升为管理员。
++	rec = sendUserWrite(router, http.MethodPut, "/api/v1/admin/users/1", `{"role":"admin"}`)
++	require.Equal(t, http.StatusForbidden, rec.Code)
++	require.Equal(t, "SCOPED_ADMIN_TARGET_FORBIDDEN", decodeErrorBody(t, rec).Reason)
++
++	// 余额需要额外的 users.balance.write。
++	rec = sendUserWrite(router, http.MethodPut, "/api/v1/admin/users/1", `{"balance":5}`)
++	require.Equal(t, http.StatusForbidden, rec.Code)
++	require.Equal(t, "SCOPED_ADMIN_BALANCE_WRITE_REQUIRED", decodeErrorBody(t, rec).Reason)
++
++	// 普通资料与状态可以修改，响应只含 id（未授权 users.read）。
++	rec = sendUserWrite(router, http.MethodPut, "/api/v1/admin/users/1", `{"status":"disabled","username":"离职员工","role":"user"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	var resp struct {
++		Data map[string]json.RawMessage `json:"data"`
++	}
++	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
++	require.Equal(t, []string{"id"}, rawMessageKeys(resp.Data))
++
++	// 不存在的用户返回 JSON 404。
++	missing := newStatusAdminService()
++	missing.getUserErr = service.ErrUserNotFound
++	rec = sendUserWrite(setupScopedUserWrites(missing, "users.update"), http.MethodPut, "/api/v1/admin/users/99", `{"status":"disabled"}`)
++	require.Equal(t, http.StatusNotFound, rec.Code)
++	require.Equal(t, "USER_NOT_FOUND", decodeErrorBody(t, rec).Reason)
++}
++
++func rawMessageKeys(m map[string]json.RawMessage) []string {
++	keys := make([]string, 0, len(m))
++	for k := range m {
++		keys = append(keys, k)
++	}
++	return keys
++}
+diff --git a/backend/internal/pkg/adminaccess/catalog.go b/backend/internal/pkg/adminaccess/catalog.go
+index 75f9d0cc9..c29e81f63 100644
+--- a/backend/internal/pkg/adminaccess/catalog.go
++++ b/backend/internal/pkg/adminaccess/catalog.go
+@@ -54,6 +54,14 @@ var definitions = []permissionDefinition{
+ 	{Permission{"users.balance.write", "增减任意用户余额", "财务", "global"}, []string{"POST /users/:id/balance"}},
+ 	{Permission{"users.quotas.read", "读取全站用户平台额度", "用户", "global"}, []string{"GET /users/:id/platform-quotas"}},
+ 	{Permission{"users.quotas.write", "修改与重置全站用户平台额度", "用户", "global"}, []string{"PUT /users/:id/platform-quotas", "POST /users/:id/platform-quotas/reset"}},
++	// 以下用户与 API Key 写权限供企业目录同步使用；受限密钥不能创建、修改管理员或其 Key，
++	// 设置余额仍须另行勾选 users.balance.write，由处理器逐字段检查。
++	{Permission{"users.create", "创建普通用户（不能创建管理员；初始余额另需余额写入权限）", "用户", "global"}, []string{"POST /users"}},
++	{Permission{"users.update", "编辑普通用户资料与状态（不能修改管理员或角色；余额另需余额写入权限）", "用户", "global"}, []string{"PUT /users/:id"}},
++	{Permission{"users.api_keys.read", "读取任意用户的 API Key（含明文密钥）", "API 密钥", "global"}, []string{"GET /users/:id/api-keys"}},
++	{Permission{"users.api_keys.create", "为启用的普通用户创建 API Key（响应含明文密钥）", "API 密钥", "global"}, []string{"POST /users/:id/api-keys"}},
++	{Permission{"api_keys.group.write", "修改普通用户 API Key 的分组绑定与限速用量", "API 密钥", "global"}, []string{"PUT /api-keys/:id"}},
++	{Permission{"api_keys.status.write", "启用或停用普通用户的 API Key", "API 密钥", "global"}, []string{"PUT /api-keys/:id/status"}},
+ 	{Permission{"groups.read", "读取所有分组配置", "分组", "global"}, []string{"GET /groups", "GET /groups/all", "GET /groups/:id", "GET /groups/:id/rate-multipliers", "GET /groups/:id/composite-routes", "GET /groups/:id/model-allowlist-candidates"}},
+ 	{Permission{"usage.read", "读取全站用量明细及用户用量", "报表", "global"}, []string{"GET /usage", "GET /usage/stats", "GET /users/:id/usage"}},
+ 	{Permission{"payment.read", "读取全站支付订单与报表", "财务", "global"}, []string{"GET /payment/dashboard", "GET /payment/orders", "GET /payment/orders/:id"}},
+diff --git a/backend/internal/pkg/adminaccess/catalog_enterprise_os_test.go b/backend/internal/pkg/adminaccess/catalog_enterprise_os_test.go
+new file mode 100644
+index 000000000..9e80aa0d9
+--- /dev/null
++++ b/backend/internal/pkg/adminaccess/catalog_enterprise_os_test.go
+@@ -0,0 +1,81 @@
++package adminaccess
++
++import "testing"
++
++// 企业目录同步（os-bridge）所需的用户与 API Key 权限：均为全站权限，逐条精确登记，互不隐含。
++func TestEnterpriseDirectorySyncPermissions(t *testing.T) {
++	expected := map[string][]string{
++		"users.create":          {"POST /users"},
++		"users.update":          {"PUT /users/:id"},
++		"users.api_keys.read":   {"GET /users/:id/api-keys"},
++		"users.api_keys.create": {"POST /users/:id/api-keys"},
++		"api_keys.group.write":  {"PUT /api-keys/:id"},
++		"api_keys.status.write": {"PUT /api-keys/:id/status"},
++	}
++	catalog := map[string]Permission{}
++	for _, entry := range PermissionCatalog() {
++		if _, dup := catalog[entry.ID]; dup {
++			t.Fatalf("权限重复登记: %s", entry.ID)
++		}
++		catalog[entry.ID] = entry
++	}
++	allRoutes := map[string]bool{}
++	for _, routes := range expected {
++		for _, route := range routes {
++			allRoutes[route] = true
++		}
++	}
++	for id, routes := range expected {
++		entry, ok := catalog[id]
++		if !ok {
++			t.Errorf("权限未登记: %s", id)
++			continue
++		}
++		if entry.Scope != "global" || entry.Label == "" || entry.Category == "" {
++			t.Errorf("%s 应为带标签与分类的全站权限: %+v", id, entry)
++		}
++		p := Policy{GlobalPermissions: []string{id}}
++		if err := ValidatePolicy(p); err != nil {
++			t.Errorf("%s: %v", id, err)
++		}
++		if err := ValidatePolicy(Policy{Rules: []Rule{{Permissions: []string{id}, AllGroups: true, AccountTypes: []string{"oauth"}}}}); err == nil {
++			t.Errorf("%s 不得作为账户/分组规则权限", id)
++		}
++		own := map[string]bool{}
++		for _, route := range routes {
++			own[route] = true
++			method, path := splitRoute(route)
++			if !RouteAllowed(p, method, "/api/v1/admin"+path) {
++				t.Errorf("%s 无法进入 %s", id, route)
++			}
++		}
++		// 不得顺带放行同组其他路由或同路径的其他方法。
++		for route := range allRoutes {
++			if own[route] {
++				continue
++			}
++			method, path := splitRoute(route)
++			if RouteAllowed(p, method, "/api/v1/admin"+path) {
++				t.Errorf("%s 不应放行 %s", id, route)
++			}
++		}
++		for _, route := range []string{"DELETE /users/:id", "GET /users", "GET /users/:id", "POST /users/:id/balance", "DELETE /api-keys/:id"} {
++			method, path := splitRoute(route)
++			if RouteAllowed(p, method, "/api/v1/admin"+path) {
++				t.Errorf("%s 不应放行 %s", id, route)
++			}
++		}
++	}
++	if RouteAllowed(Policy{GlobalPermissions: []string{"users.read"}}, "POST", "/api/v1/admin/users/:id/api-keys") {
++		t.Fatal("旧的只读策略不得继承新增写权限")
++	}
++}
++
++func splitRoute(route string) (string, string) {
++	for i, c := range route {
++		if c == ' ' {
++			return route[:i], route[i+1:]
++		}
++	}
++	return route, ""
++}
+diff --git a/backend/internal/server/middleware/admin_auth.go b/backend/internal/server/middleware/admin_auth.go
+index 61899cb98..de631bda0 100644
+--- a/backend/internal/server/middleware/admin_auth.go
++++ b/backend/internal/server/middleware/admin_auth.go
+@@ -278,5 +278,12 @@ func recordAdminKeyRequest(c *gin.Context, audit *service.AuditLogService, item
+ 		}
+ 		entry.Extra["denial_reason"] = reason
+ 	}
++	// 管理密钥请求统一记为 admin.api_key.request；具体业务动作另存 route_action，便于按动作检索。
++	if fullPath := c.FullPath(); fullPath != "" {
++		if entry.Extra == nil {
++			entry.Extra = map[string]any{}
++		}
++		entry.Extra["route_action"] = AuditActionForRoute(c.Request.Method, fullPath)
++	}
+ 	audit.Record(entry)
+ }
+diff --git a/backend/internal/server/middleware/audit_log.go b/backend/internal/server/middleware/audit_log.go
+index ad6e42d6c..e10252ec5 100644
+--- a/backend/internal/server/middleware/audit_log.go
++++ b/backend/internal/server/middleware/audit_log.go
+@@ -144,6 +144,18 @@ var auditActionOverrides = map[string]string{
+ 	"POST /api/v1/admin/prompt-audit/events/batch-delete":     "admin.prompt_audit.events.batch_delete",
+ 	"POST /api/v1/admin/prompt-audit/events/delete-preview":   "admin.prompt_audit.events.delete_preview",
+ 	"POST /api/v1/admin/prompt-audit/events/delete-by-filter": "admin.prompt_audit.events.filter_delete",
++	// 管理员代用户建 Key / 停用恢复 Key（企业目录同步）。响应含明文 Key，审计只记录请求体，不记录响应。
++	"POST /api/v1/admin/users/:id/api-keys": "admin.users.api_keys.create",
++	"PUT /api/v1/admin/api-keys/:id/status": "admin.api_keys.status.update",
++	"PUT /api/v1/admin/api-keys/:id":        "admin.api_keys.group.update",
++}
++
++// AuditActionForRoute 返回路由的审计动作名：优先精确映射，未命中时按路由模板推导。
++func AuditActionForRoute(method, fullPath string) string {
++	if v, ok := auditActionOverrides[method+" "+fullPath]; ok {
++		return v
++	}
++	return deriveAuditAction(method, fullPath)
+ }
+ 
+ // auditBodyOmittedRoutes 请求体几乎整体由凭证构成的路由（如整块粘贴 auth JSON 的导入接口）。
+diff --git a/backend/internal/server/middleware/audit_log_enterprise_os_test.go b/backend/internal/server/middleware/audit_log_enterprise_os_test.go
+new file mode 100644
+index 000000000..1c80cb390
+--- /dev/null
++++ b/backend/internal/server/middleware/audit_log_enterprise_os_test.go
+@@ -0,0 +1,102 @@
++package middleware
++
++import (
++	"bytes"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Wei-Shaw/sub2api/internal/service"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++func TestAdminUserAPIKeyRoutesHaveStableAuditActions(t *testing.T) {
++	expected := map[string]string{
++		"POST /api/v1/admin/users/:id/api-keys": "admin.users.api_keys.create",
++		"PUT /api/v1/admin/api-keys/:id/status": "admin.api_keys.status.update",
++		"PUT /api/v1/admin/api-keys/:id":        "admin.api_keys.group.update",
++	}
++	for route, action := range expected {
++		require.Equal(t, action, auditActionOverrides[route], route)
++	}
++	require.Equal(t, "admin.api_keys.status.update", AuditActionForRoute("PUT", "/api/v1/admin/api-keys/:id/status"))
++	require.Equal(t, "admin.users.update", AuditActionForRoute("PUT", "/api/v1/admin/users/:id"), "未登记的路由按模板推导")
++}
++
++// 管理员代建 Key 的响应含明文 Key；审计只能记录请求体，明文不得进入审计库。
++func TestAdminCreateUserAPIKeyAuditOmitsPlaintextKey(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	repository := &auditCaptureRepository{}
++	auditService := service.NewAuditLogService(repository, nil)
++	auditService.Start()
++
++	const plaintext = "sk-audit-canary-plaintext-key"
++	router := gin.New()
++	router.Use(func(c *gin.Context) {
++		c.Set(string(ContextKeyUser), AuthSubject{UserID: 77})
++		c.Set(string(ContextKeyUserRole), "admin")
++		c.Next()
++	})
++	router.Use(gin.HandlerFunc(NewAuditLogMiddleware(auditService)))
++	router.POST("/api/v1/admin/users/:id/api-keys", func(c *gin.Context) {
++		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"id": 1, "key": plaintext}})
++	})
++	router.PUT("/api/v1/admin/api-keys/:id/status", func(c *gin.Context) {
++		c.JSON(http.StatusOK, gin.H{"code": 0, "data": gin.H{"id": 1, "key": plaintext, "status": "disabled"}})
++	})
++
++	for _, tc := range []struct{ method, path, body string }{
++		{http.MethodPost, "/api/v1/admin/users/12/api-keys", `{"name":"enterprise-os","group_id":3}`},
++		{http.MethodPut, "/api/v1/admin/api-keys/1/status", `{"status":"disabled"}`},
++	} {
++		req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
++		req.Header.Set("Content-Type", "application/json")
++		rec := httptest.NewRecorder()
++		router.ServeHTTP(rec, req)
++		require.Equal(t, http.StatusOK, rec.Code)
++		require.Contains(t, rec.Body.String(), plaintext)
++	}
++	auditService.Stop()
++
++	repository.mu.Lock()
++	logs := append([]*service.AuditLog(nil), repository.logs...)
++	repository.mu.Unlock()
++	require.Len(t, logs, 2)
++	actions := map[string]bool{}
++	for _, entry := range logs {
++		actions[entry.Action] = true
++		data, err := json.Marshal(entry)
++		require.NoError(t, err)
++		require.NotContains(t, string(data), plaintext)
++	}
++	require.True(t, actions["admin.users.api_keys.create"])
++	require.True(t, actions["admin.api_keys.status.update"])
++}
++
++// 受限管理密钥的请求统一记为 admin.api_key.request，具体动作写入 extra.route_action。
++func TestScopedAdminKeyAuditRecordsRouteAction(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	repository := &auditCaptureRepository{}
++	auditService := service.NewAuditLogService(repository, nil)
++	auditService.Start()
++
++	item := &service.ScopedAdminKey{ID: "key-id", CreatedBy: 9, ScopedAdminKeyInput: service.ScopedAdminKeyInput{Name: "os-bridge"}}
++	router := gin.New()
++	router.PUT("/api/v1/admin/api-keys/:id/status", func(c *gin.Context) {
++		c.Status(http.StatusOK)
++		recordAdminKeyRequest(c, auditService, item)
++	})
++	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/api-keys/5/status", bytes.NewBufferString(`{"status":"disabled"}`))
++	router.ServeHTTP(httptest.NewRecorder(), req)
++	auditService.Stop()
++
++	repository.mu.Lock()
++	defer repository.mu.Unlock()
++	require.Len(t, repository.logs, 1)
++	entry := repository.logs[0]
++	require.Equal(t, "admin.api_key.request", entry.Action)
++	require.Equal(t, "admin.api_keys.status.update", entry.Extra["route_action"])
++	require.Equal(t, "key-id", entry.Extra["admin_key_id"])
++}
+diff --git a/backend/internal/server/routes/admin.go b/backend/internal/server/routes/admin.go
+index ad31b0e7e..c727fc368 100644
+--- a/backend/internal/server/routes/admin.go
++++ b/backend/internal/server/routes/admin.go
+@@ -187,6 +187,7 @@ func registerAdminAPIKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+ 	apiKeys := admin.Group("/api-keys")
+ 	{
+ 		apiKeys.PUT("/:id", h.Admin.APIKey.UpdateGroup)
++		apiKeys.PUT("/:id/status", h.Admin.APIKey.UpdateStatus)
+ 	}
+ }
+ 
+diff --git a/backend/internal/server/routes/custom_admin_key_enterprise_os_test.go b/backend/internal/server/routes/custom_admin_key_enterprise_os_test.go
+new file mode 100644
+index 000000000..e16e3f167
+--- /dev/null
++++ b/backend/internal/server/routes/custom_admin_key_enterprise_os_test.go
+@@ -0,0 +1,96 @@
++//go:build unit
++
++package routes
++
++import (
++	"context"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/Wei-Shaw/sub2api/internal/handler"
++	adminhandler "github.com/Wei-Shaw/sub2api/internal/handler/admin"
++	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
++	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
++	"github.com/Wei-Shaw/sub2api/internal/service"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++type enterpriseSyncAdminService struct{ service.AdminService }
++
++func (*enterpriseSyncAdminService) GetUser(_ context.Context, id int64) (*service.User, error) {
++	return &service.User{ID: id, Role: service.RoleUser, Status: service.StatusActive}, nil
++}
++func (*enterpriseSyncAdminService) CreateUser(_ context.Context, in *service.CreateUserInput) (*service.User, error) {
++	return &service.User{ID: 100, Email: in.Email, Role: service.RoleUser, Status: service.StatusActive}, nil
++}
++func (*enterpriseSyncAdminService) UpdateUser(_ context.Context, id int64, _ *service.UpdateUserInput) (*service.User, error) {
++	return &service.User{ID: id, Role: service.RoleUser, Status: service.StatusActive}, nil
++}
++func (*enterpriseSyncAdminService) GetUserAPIKeys(context.Context, int64, int, int, string, string) ([]service.APIKey, int64, error) {
++	return nil, 0, nil
++}
++func (*enterpriseSyncAdminService) AdminUpdateAPIKeyGroupID(_ context.Context, keyID int64, _ *int64) (*service.AdminUpdateAPIKeyGroupIDResult, error) {
++	return &service.AdminUpdateAPIKeyGroupIDResult{APIKey: &service.APIKey{ID: keyID}}, nil
++}
++
++// os-bridge 用的受限管理密钥：每条新权限只放行自己的路由，未勾选时一律 403。
++func TestScopedAdminKeyEnterpriseDirectorySyncRoutes(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	cases := []struct {
++		permission, method, path, body string
++	}{
++		{"users.create", "POST", "/users", `{"email":"e@example.com","password":"secret123"}`},
++		{"users.update", "PUT", "/users/7", `{"status":"disabled"}`},
++		{"users.api_keys.read", "GET", "/users/7/api-keys", ``},
++		{"users.api_keys.create", "POST", "/users/7/api-keys", `{"name":"enterprise-os"}`},
++		{"api_keys.group.write", "PUT", "/api-keys/8", `{"group_id":0}`},
++		{"api_keys.status.write", "PUT", "/api-keys/8/status", `{"status":"disabled"}`},
++	}
++	all := make([]string, 0, len(cases))
++	for _, tc := range cases {
++		all = append(all, tc.permission)
++	}
++	for _, granted := range append([][]string{nil, {"users.read"}, all}, func() [][]string {
++		single := make([][]string, 0, len(cases))
++		for _, tc := range cases {
++			single = append(single, []string{tc.permission})
++		}
++		return single
++	}()...) {
++		keys := &scopedRouteKeys{}
++		settings := service.NewSettingService(nil, nil)
++		settings.SetScopedAdminKeyRepository(keys)
++		key, _, err := settings.CreateScopedAdminKey(context.Background(), service.ScopedAdminKeyInput{
++			Name: "os-bridge", Enabled: true, Policy: adminaccess.Policy{GlobalPermissions: granted},
++		}, 9)
++		require.NoError(t, err)
++		auth := middleware.NewAdminAuthMiddleware(nil, service.NewUserService(&scopedRouteUsers{}, nil, nil, nil), settings, nil)
++		stub := &enterpriseSyncAdminService{}
++		r := gin.New()
++		RegisterAdminRoutes(r.Group("/api/v1"), &handler.Handlers{Admin: &handler.AdminHandlers{
++			Account: &adminhandler.AccountHandler{},
++			User:    adminhandler.NewUserHandler(stub, nil, nil, nil, nil, nil, nil),
++			APIKey:  adminhandler.NewAdminAPIKeyHandler(stub, nil),
++			Setting: adminhandler.NewSettingHandler(settings, nil, nil, nil, nil, nil, nil),
++		}}, auth, middleware.AuditLogMiddleware(func(c *gin.Context) { c.Next() }), middleware.StepUpAuthMiddleware(func(c *gin.Context) { c.Next() }), nil, nil)
++		for _, tc := range cases {
++			req := httptest.NewRequest(tc.method, "/api/v1/admin"+tc.path, strings.NewReader(tc.body))
++			req.Header.Set("x-api-key", key)
++			req.Header.Set("Content-Type", "application/json")
++			w := httptest.NewRecorder()
++			r.ServeHTTP(w, req)
++			allowed := false
++			for _, p := range granted {
++				allowed = allowed || p == tc.permission
++			}
++			if allowed {
++				require.NotEqual(t, 403, w.Code, "%v %s %s: %s", granted, tc.method, tc.path, w.Body.String())
++				require.NotEqual(t, 401, w.Code, "%v %s %s: %s", granted, tc.method, tc.path, w.Body.String())
++			} else {
++				require.Equal(t, 403, w.Code, "%v %s %s: %s", granted, tc.method, tc.path, w.Body.String())
++			}
++		}
++	}
++}
+diff --git a/frontend/src/i18n/locales/en/adminAccessKeys.ts b/frontend/src/i18n/locales/en/adminAccessKeys.ts
+index 7809ec15d..2f1f67957 100644
+--- a/frontend/src/i18n/locales/en/adminAccessKeys.ts
++++ b/frontend/src/i18n/locales/en/adminAccessKeys.ts
+@@ -214,6 +214,30 @@ export default {
+       "label": "Change and reset all user platform quotas",
+       "category": "Users"
+     },
++    "users_dcreate": {
++      "label": "Create regular users (no administrators; initial balance also needs balance write)",
++      "category": "Users"
++    },
++    "users_dupdate": {
++      "label": "Edit regular user profiles and status (no administrators or roles; balance also needs balance write)",
++      "category": "Users"
++    },
++    "users_dapi_ukeys_dread": {
++      "label": "Read any user's API keys (including plaintext keys)",
++      "category": "API keys"
++    },
++    "users_dapi_ukeys_dcreate": {
++      "label": "Create API keys for active regular users (response includes the plaintext key)",
++      "category": "API keys"
++    },
++    "api_ukeys_dgroup_dwrite": {
++      "label": "Change group binding and rate-limit usage of regular users' API keys",
++      "category": "API keys"
++    },
++    "api_ukeys_dstatus_dwrite": {
++      "label": "Enable or disable regular users' API keys",
++      "category": "API keys"
++    },
+     "groups_dread": {
+       "label": "Read all group configurations",
+       "category": "Groups"
+diff --git a/frontend/src/i18n/locales/zh/adminAccessKeys.ts b/frontend/src/i18n/locales/zh/adminAccessKeys.ts
+index 21c9779b0..bb24b29df 100644
+--- a/frontend/src/i18n/locales/zh/adminAccessKeys.ts
++++ b/frontend/src/i18n/locales/zh/adminAccessKeys.ts
+@@ -214,6 +214,30 @@ export default {
+       "label": "修改与重置全站用户平台额度",
+       "category": "用户"
+     },
++    "users_dcreate": {
++      "label": "创建普通用户（不能创建管理员；初始余额另需余额写入权限）",
++      "category": "用户"
++    },
++    "users_dupdate": {
++      "label": "编辑普通用户资料与状态（不能修改管理员或角色；余额另需余额写入权限）",
++      "category": "用户"
++    },
++    "users_dapi_ukeys_dread": {
++      "label": "读取任意用户的 API Key（含明文密钥）",
++      "category": "API 密钥"
++    },
++    "users_dapi_ukeys_dcreate": {
++      "label": "为启用的普通用户创建 API Key（响应含明文密钥）",
++      "category": "API 密钥"
++    },
++    "api_ukeys_dgroup_dwrite": {
++      "label": "修改普通用户 API Key 的分组绑定与限速用量",
++      "category": "API 密钥"
++    },
++    "api_ukeys_dstatus_dwrite": {
++      "label": "启用或停用普通用户的 API Key",
++      "category": "API 密钥"
++    },
+     "groups_dread": {
+       "label": "读取所有分组配置",
+       "category": "分组"
+-- 
+2.56.1.windows.1
+

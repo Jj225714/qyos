@@ -1,0 +1,12 @@
+{
+    "name": "os-bridge",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "企业OS 集成服务：Casdoor 身份 → JAPI 开户/按人计费、RAGFlow 部门知识库代理、Jimage 身份查询",
+    "engines": { "node": ">=22" },
+    "scripts": {
+        "start": "node src/server.mjs --config /etc/os-bridge/config.json",
+        "test": "node --test test/*.test.mjs"
+    }
+}
