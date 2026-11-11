@@ -72,7 +72,7 @@ $('createBrainUser').onclick=async()=>{try{const email=$('brainEmail').value.tri
 // Readable credentials are fetched only through the owner-authorized endpoint.
 const credentialCard = document.createElement('section');
 credentialCard.className = 'card';
-credentialCard.innerHTML = '<h2>账号密码与完整 API Key</h2><p>统一后台管理员可查看已保存的明文凭据。其他平台用户的密码无法从哈希还原；配置保险库使用JAPI账号密码。</p><button id="showCredentials">显示完整凭据</button><button id="hideCredentials">隐藏凭据</button><p id="credentialNotice" role="status"></p><div id="credentialTable" style="overflow:auto"></div>';
+credentialCard.innerHTML = '<h2>账号与 API Key</h2><p>密钥只显示前 7 位和后 4 位，用于核对是否配置正确；管理员密码不经网页显示，请在服务器私有环境文件中查看或修改。其他平台用户的密码无法从哈希还原；配置保险库使用JAPI账号密码。</p><button id="showCredentials">显示凭据摘要</button><button id="hideCredentials">隐藏凭据</button><p id="credentialNotice" role="status"></p><div id="credentialTable" style="overflow:auto"></div>';
 document.querySelector('#app').appendChild(credentialCard);
 function credentialRow(body, values) {
   const tr=document.createElement('tr');
@@ -85,13 +85,13 @@ async function showCredentials() {
   try {
     const result=await api('/api/admin/credentials');
     const table=document.createElement('table'), head=document.createElement('thead'), body=document.createElement('tbody');
-    credentialRow(head,['平台','账号 / 名称','凭据类型','完整值']);
-    credentialRow(body,['Jadmin',result.adminLogin.email,'当前登录密码',result.adminLogin.password]);
+    credentialRow(head,['平台','账号 / 名称','凭据类型','值（掩码）']);
+    credentialRow(body,['Jadmin',result.adminLogin.email,'登录密码',result.adminLogin.passwordConfigured?'已设置（不显示）':'未设置']);
     credentialRow(body,['Jchat','模型接口','API Key',result.librechatApiKey||'未配置']);
-    (result.keys?.data?.items||[]).forEach(key=>credentialRow(body,['JAPI',key.name||key.id,'API Key',key.key||'未返回']));
+    (result.keys?.data?.items||[]).forEach(key=>credentialRow(body,['JAPI',key.name||key.id,'API Key',key.keyMasked||'未返回']));
     credentialRow(body,['Jchat / JAPI','用户账号','登录密码','哈希存储，无法还原；需设置新密码']);
     table.append(head,body);$('credentialTable').appendChild(table);
-    $('credentialNotice').textContent=result.keys?.error||'已显示完整凭据，本次查看已记录审计。';
+    $('credentialNotice').textContent=result.keys?.error||'已显示凭据摘要，本次查看已记录审计。';
   } catch(e) { $('credentialNotice').textContent='读取失败：'+e.message; }
 }
 $('showCredentials').onclick=showCredentials;

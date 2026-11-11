@@ -2,21 +2,37 @@ import base64, hashlib, hmac, json, os, secrets, sqlite3, time, subprocess, thre
 import urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import setup_wizard
+import enterprise
 DB=os.environ.get('ADMIN_DB','/opt/enterprise-ai-platform/admin-panel/admin.db'); KEY=os.environ.get('ADMIN_SECRET',''); EMAIL=os.environ.get('ADMIN_EMAIL',''); PASS=os.environ.get('ADMIN_PASSWORD',''); LCENV=os.environ.get('LIBRECHAT_ENV','/opt/enterprise-ai-platform/librechat.env'); LCYAML=os.environ.get('LIBRECHAT_CONFIG','/opt/enterprise-ai-platform/librechat.yaml'); MONGO_CONTAINER=os.environ.get('LIBRECHAT_MONGO_CONTAINER','enterprise-ai-platform-mongodb-1')
 SUB2API_BASE=os.environ.get('SUB2API_BASE_URL','http://127.0.0.1:8080')
 SUB2API_ENV=os.environ.get('SUB2API_ENV','/opt/enterprise-ai-platform/sub2api.env')
 VAULT_ADMIN_FILE=os.environ.get('CONFIG_VAULT_ADMIN_FILE','/opt/enterprise-ai-platform/private/vault-admins.json')
 VAULT_ADMIN_CLI=os.environ.get('CONFIG_VAULT_ADMIN_CLI','/opt/enterprise-ai-platform/config-vault/admin-users.mjs')
 MODEL_BASE_URL=os.environ.get('MODEL_BASE_URL',SUB2API_BASE+'/v1')
+from contextlib import closing
+_schema_lock=threading.Lock(); _schema_ready=set()
+def connect():
+ c=sqlite3.connect(DB,timeout=15); c.row_factory=sqlite3.Row; return c
+def init_db():
+ """Creates/migrates the schema and turns on WAL. Runs once per process (main() calls it at startup)."""
+ with _schema_lock:
+  if DB in _schema_ready: return
+  with closing(connect()) as c:
+   c.execute('pragma journal_mode=WAL')
+   c.execute('create table if not exists users(id integer primary key,email text unique,password text,role text,enabled integer default 1,created integer,username text)')
+   cols={r[1] for r in c.execute('pragma table_info(users)')}
+   if 'username' not in cols: c.execute('alter table users add column username text')
+   c.execute('create table if not exists config(k text primary key,v text,updated integer)')
+   c.execute("delete from config where k='apiKey'")  # older versions kept a plaintext copy of the API key here
+   c.execute('create table if not exists audit(id integer primary key,action text,detail text,at integer)')
+   c.execute('create table if not exists metrics(id integer primary key,at integer,cpu real,memory real,disk real,containers text)')
+   enterprise.init_db(c)
+   c.commit()
+  _schema_ready.add(DB)
 def db():
- c=sqlite3.connect(DB); c.row_factory=sqlite3.Row
- c.execute('create table if not exists users(id integer primary key,email text unique,password text,role text,enabled integer default 1,created integer,username text)')
- cols={r[1] for r in c.execute('pragma table_info(users)')}
- if 'username' not in cols: c.execute('alter table users add column username text')
- c.execute('create table if not exists config(k text primary key,v text,updated integer)')
- c.execute('create table if not exists audit(id integer primary key,action text,detail text,at integer)')
- c.execute('create table if not exists metrics(id integer primary key,at integer,cpu real,memory real,disk real,containers text)')
- c.commit(); return c
+ """A new connection; the caller closes it (request handlers do so in H.close_db, jobs use closing())."""
+ if DB not in _schema_ready: init_db()
+ return connect()
 
 def audit(c, action, detail):
  c.execute('insert into audit(action,detail,at) values(?,?,?)',(action,detail,int(time.time()))); c.commit()
@@ -92,7 +108,8 @@ def system_metrics():
 def collect_metrics():
  while True:
   try:
-   m=system_metrics(); c=db(); c.execute('insert into metrics(at,cpu,memory,disk,containers) values(?,?,?,?,?)',(m['at'],m['cpu'],m['memory'],m['disk'],json.dumps(m['containers']))); c.execute('delete from metrics where at<?',(int(time.time())-86400,)); c.commit(); c.close()
+   m=system_metrics()
+   with closing(db()) as c: c.execute('insert into metrics(at,cpu,memory,disk,containers) values(?,?,?,?,?)',(m['at'],m['cpu'],m['memory'],m['disk'],json.dumps(m['containers']))); c.execute('delete from metrics where at<?',(int(time.time())-86400,)); c.commit()
   except Exception: pass
   time.sleep(60)
 
@@ -210,17 +227,25 @@ def mongo_enabled(email,enabled):
  code="db.users.updateOne({email:"+q+"},{$set:{banned:"+value+",updatedAt:new Date()}})"
  return mongo_eval(code) is not None
 
+def check_config_value(name, value):
+ """Values written into librechat.env / librechat.yaml must stay on one line (no injected keys)."""
+ if value is None or value=='': return
+ if not isinstance(value,str) or any(ch in value for ch in '\r\n\0'): raise ValueError(name+' 不能包含换行或空字符')
+ if name=='defaultModel' and any(ch in value for ch in '[],#'): raise ValueError('defaultModel 不能包含 [ ] , #')
+
 def save_real_config(default_model=None):
  if not default_model:return
+ check_config_value('defaultModel',default_model)
  text=open(LCYAML).read()
  import re
- text=re.sub(r'default: \[[^\]]*\]', 'default: ['+default_model+']', text, count=1)
+ text=re.sub(r'default: \[[^\]]*\]', lambda m:'default: ['+default_model+']', text, count=1)
  open(LCYAML,'w').write(text)
 
 def save_endpoint(base_url=None, api_key=None):
  import re
+ check_config_value('baseURL',base_url); check_config_value('apiKey',api_key)
  if base_url:
-  text=open(LCYAML).read(); text=re.sub(r"baseURL: [^\n]+", 'baseURL: '+json.dumps(base_url), text, count=1); open(LCYAML,'w').write(text)
+  text=open(LCYAML).read(); text=re.sub(r"baseURL: [^\n]+", lambda m:'baseURL: '+json.dumps(base_url), text, count=1); open(LCYAML,'w').write(text)
  if api_key:
   lines=[]; found=False
   for line in open(LCENV):
@@ -238,23 +263,107 @@ def tok(e):
  encoded=base64.urlsafe_b64encode(payload.encode()).decode().rstrip('=')
  return encoded+'.'+hmac.new(KEY.encode(),encoded.encode(),hashlib.sha256).hexdigest()
 def who(t):
+ # An empty or short ADMIN_SECRET would let anyone forge a session token.
+ if len(KEY)<32: return None
  try:
   a,s=t.split('.'); e,u=base64.urlsafe_b64decode(a+'='*((4-len(a)%4)%4)).decode().split('|')
   return e if int(u)>time.time() and hmac.compare_digest(s,hmac.new(KEY.encode(),a.encode(),hashlib.sha256).hexdigest()) else None
  except:return None
+def admin_email(c, email):
+ """Canonical Jadmin administrator email for an SSO login, or None."""
+ email=(email or '').strip().lower()
+ if not email: return None
+ if EMAIL and EMAIL.lower()==email: return EMAIL
+ row=c.execute("select email from users where lower(email)=? and enabled=1 and upper(role)='ADMIN'",(email,)).fetchone()
+ return row['email'] if row else None
 def is_admin_actor(c, email):
  if not email: return False
  if email == EMAIL: return True
  row=c.execute('select role,enabled from users where email=?',(email,)).fetchone()
  return bool(row and row['enabled'] and str(row['role']).upper()=='ADMIN')
+def mask(value):
+ """Shows only the first 7 and last 4 characters of a key."""
+ value=str(value or '')
+ if not value: return ''
+ return value[:7]+'…'+value[-4:] if len(value)>=16 else '****'
+# /api/sso/start: per-IP limit on top of the global cap of 1000 pending states in enterprise.sso_start.
+SSO_START_LIMIT=10; SSO_START_WINDOW=60
+_sso_hits={}; _sso_lock=threading.Lock()
+def sso_rate_ok(ip, now=None):
+ now=now or time.time(); since=now-SSO_START_WINDOW
+ with _sso_lock:
+  if len(_sso_hits)>10000:
+   for k in [k for k,v in _sso_hits.items() if not v or v[-1]<=since]: del _sso_hits[k]
+  hits=[t for t in _sso_hits.get(ip,()) if t>since]
+  ok=len(hits)<SSO_START_LIMIT
+  if ok: hits.append(now)
+  _sso_hits[ip]=hits
+  return ok
+SECURITY_HEADERS=[('X-Frame-Options','DENY'),('X-Content-Type-Options','nosniff'),('Referrer-Policy','no-referrer')]
+CSP="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 class H(BaseHTTPRequestHandler):
+ def end_headers(self):
+  for k,v in SECURITY_HEADERS+[('Content-Security-Policy',CSP)]: self.send_header(k,v)
+  super().end_headers()
+ def client_ip(self):
+  # Nginx appends the peer address, so the last X-Forwarded-For hop is the one it saw.
+  hops=[h.strip() for h in self.headers.get('X-Forwarded-For','').split(',') if h.strip()]
+  return hops[-1] if hops else self.client_address[0]
+ def conn(self):
+  """This request's sqlite connection, closed by close_db when the request ends."""
+  if getattr(self,'_db',None) is None: self._db=db()
+  return self._db
+ def close_db(self):
+  c=getattr(self,'_db',None); self._db=None
+  if c is not None: c.close()
+ def html(self,text,n=200,extra=()):
+  self.send_response(n);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Cache-Control','no-store')
+  for k,v in extra: self.send_header(k,v)
+  self.end_headers();self.wfile.write(text.encode())
  def out(self,x,n=200): self.send_response(n);self.send_header('Content-Type','application/json');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(json.dumps(x).encode())
  def body(self): return json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or b'{}')
+ def redirect(self,location,cookie=None):
+  self.send_response(302);self.send_header('Location',location);self.send_header('Cache-Control','no-store')
+  if cookie: self.send_header('Set-Cookie',cookie)
+  self.end_headers()
+ def enterprise_get(self,query):
+  """Unauthenticated enterprise routes: SSO navigation and the os-bridge department feed."""
+  from urllib.parse import quote, parse_qs
+  if self.path=='/api/sso/status': return self.out({'enabled':enterprise.sso_enabled()})
+  if self.path=='/api/internal/departments':
+   if not enterprise.bridge_authorized(self.headers.get('X-Internal-Token')): return self.out({'error':'unauthorized'},401)
+   c=self.conn(); return self.out(enterprise.bridge_payload(c))
+  clear=enterprise.STATE_COOKIE+'=; Path=/api/sso; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+  if self.path=='/api/sso/start':
+   if not sso_rate_ok(self.client_ip()):
+    target='/#sso-error='+quote('登录请求过于频繁，请一分钟后再试')
+    return self.html('<!doctype html><meta charset=utf-8><meta http-equiv=refresh content="3;url='+target+'"><title>Jadmin</title><p>登录请求过于频繁，请一分钟后再试。</p><p><a href="'+target+'">返回登录页</a></p>',429,[('Retry-After',str(SSO_START_WINDOW))])
+   c=self.conn(); link=(parse_qs(query).get('link') or [None])[0]
+   try: location,cookie=enterprise.sso_start(c,link=link)
+   except enterprise.EnterpriseError as e: return self.redirect('/#sso-error='+quote(str(e)))
+   return self.redirect(location,cookie)
+  c=self.conn()
+  try:
+   result=enterprise.sso_finish(c,query,enterprise.cookie_state(self.headers.get('Cookie')))
+   actor=admin_email(c,result['email'])
+   if not actor: audit(c,'sso_denied',result['email']); return self.redirect('/#sso-error='+quote('该企业账号关联的邮箱不是 Jadmin 管理员'),clear)
+   if result['linked']:
+    audit(c,'sso_link',actor); return self.redirect('/#sso-token='+quote(tok(actor))+'&sso-notice='+quote('已关联企业账号，以后可直接用企业账号登录'),clear)
+   audit(c,'sso_login',actor); return self.redirect('/#sso-token='+quote(tok(actor)),clear)
+  except enterprise.EnterpriseError as e:
+   audit(c,'sso_denied',str(e)); return self.redirect('/#sso-error='+quote(str(e)),clear)
  def do_GET(self):
+  try: return self.handle_get()
+  finally: self.close_db()
+ def do_POST(self):
+  try: return self.handle_post()
+  finally: self.close_db()
+ def handle_get(self):
   from urllib.parse import urlsplit
-  self.path=urlsplit(self.path).path
-  if self.path=='/': self.send_response(200);self.send_header('Content-Type','text/html');self.end_headers();self.wfile.write(HTML.encode());return
-  c=db()
+  query=urlsplit(self.path).query; self.path=urlsplit(self.path).path
+  if self.path in ('/api/sso/status','/api/sso/start','/api/sso/callback','/api/internal/departments'): return self.enterprise_get(query)
+  if self.path=='/': return self.html(HTML)
+  c=self.conn()
   actor=who(self.headers.get('Authorization','').replace('Bearer ',''))
   if not actor:return self.out({'error':'unauthorized'},401)
   if not is_admin_actor(c,actor):return self.out({'error':'administrator_required'},403)
@@ -262,15 +371,22 @@ class H(BaseHTTPRequestHandler):
    if actor!=EMAIL:return self.out({'error':'owner_required'},403)
    return self.out(setup_wizard.status())
   if self.path=='/api/admin/credentials':
-   actor=who(self.headers.get('Authorization','').replace('Bearer ',''))
    if actor!=EMAIL: return self.out({'error':'administrator_required'},403)
    keys=sub2api_request('/api/v1/keys')
+   for item in (keys.get('data',{}).get('items',[]) if isinstance(keys,dict) and isinstance(keys.get('data'),dict) else []):
+    if isinstance(item,dict) and 'key' in item: item['keyMasked']=mask(item.pop('key'))
    audit(c,'view_credentials',actor)
-   return self.out({'librechatApiKey':raw_env('ZHITOUZHUAN_API_KEY'),'keys':keys,'adminLogin':{'email':EMAIL,'password':PASS},'passwordNote':'用户密码使用哈希存储，无法还原；配置保险库共用 JAPI 账号。'})
+   return self.out({'librechatApiKey':mask(raw_env('ZHITOUZHUAN_API_KEY')),'keys':keys,'adminLogin':{'email':EMAIL,'passwordConfigured':bool(PASS)},'passwordNote':'密钥只显示前 7 位和后 4 位；管理员密码不经接口返回，请在服务器私有环境文件中查看或修改。用户密码使用哈希存储，无法还原。'})
+  if self.path=='/api/admin/login-im':
+   try: return self.out(enterprise.login_im_status(c))
+   except enterprise.EnterpriseError as e: return self.out({'error':str(e)},e.status)
+  if self.path=='/api/admin/sso/links':
+   own=enterprise.list_bindings(c,actor)
+   return self.out({'enabled':enterprise.sso_enabled(),'self':own[0] if own else None,'owner':actor==EMAIL,'bindings':enterprise.list_bindings(c) if actor==EMAIL else own})
   if self.path=='/api/model-status':return self.out(model_status())
   if self.path in ('/api/modules','/api/admin/modules'):return self.out({'modules':module_status()})
   if self.path=='/api/users':return self.out({'users':[dict(x) for x in c.execute('select id,email,role,enabled,created from users')]})
-  if self.path=='/api/config':return self.out({'config':{x['k']:x['v'] for x in c.execute('select k,v from config')},'current':current_config(),'models':models()})
+  if self.path=='/api/config':return self.out({'config':{x['k']:x['v'] for x in c.execute("select k,v from config where k<>'apiKey'")},'current':current_config(),'models':models()})
   if self.path in ('/api/health','/api/admin/services'):
    modules=module_status(); return self.out({'librechat':modules['librechat']['status']=='healthy','sub2api':modules['sub2api']['status']=='healthy','image':modules['image']['status']=='healthy','configVault':modules['configVault']['status']=='reachable','providerRelay':modules['providerRelay']['status']=='reachable','admin':True,'nginx':health('http://127.0.0.1:80')})
   if self.path in ('/api/admin/accounts','/api/accounts'): return self.out({'accounts':unified_accounts()})
@@ -280,6 +396,10 @@ class H(BaseHTTPRequestHandler):
     if isinstance(item,dict) and item.get('key'): item['keyMasked']=item['key'][:7]+'…'+item['key'][-4:]; item.pop('key',None)
    return self.out({'users':users,'keys':keys,'usage':usage,'account':me})
   if self.path in ('/api/admin/config-vault','/api/config-vault'): return self.out(vault_admin_details())
+  if self.path=='/api/admin/departments': return self.out({'departments':enterprise.list_departments(c),'assignments':enterprise.list_assignments(c),'sso':enterprise.sso_enabled()})
+  if self.path=='/api/admin/directory':
+   try: return self.out(enterprise.directory_report(c))
+   except enterprise.EnterpriseError as e: return self.out({'error':str(e)},e.status)
   if self.path in ('/api/audit','/api/admin/audit'):return self.out({'audit':[dict(x) for x in c.execute('select action,detail,at from audit order by id desc limit 100')]})
   if self.path in ('/api/metrics','/api/admin/metrics'):
    rows=[dict(x) for x in c.execute('select at,cpu,memory,disk,containers from metrics order by at desc limit 1440')];return self.out({'current':system_metrics(),'history':rows})
@@ -291,12 +411,12 @@ class H(BaseHTTPRequestHandler):
   self.out({'error':'not_found'},404)
  def do_PATCH(self):
   return self.do_POST()
- def do_POST(self):
+ def handle_post(self):
   if self.path.startswith('/api/admin/users'):
    self.path=self.path.replace('/api/admin','/api',1)
   elif self.path=='/api/admin/config':
    self.path='/api/config'
-  d=self.body();c=db()
+  d=self.body();c=self.conn()
   if self.path=='/api/login':
    ok=bool(EMAIL and PASS and d.get('email')==EMAIL and hmac.compare_digest(d.get('password',''),PASS))
    if not ok:
@@ -337,16 +457,52 @@ class H(BaseHTTPRequestHandler):
    action='grant' if self.path.endswith('grant') else 'revoke'; uid=d.get('userId')
    if not str(uid).isdigit(): return self.out({'error':'userId_required'},400)
    vault_admins(action,uid); audit(c,'vault_admin_'+action,str(uid)); return self.out(vault_admin_details())
+  if self.path in ('/api/admin/departments','/api/admin/departments/delete','/api/admin/assignments'):
+   try:
+    if self.path.endswith('/delete'): enterprise.delete_department(c,str(d.get('code',''))); audit(c,'department_delete',str(d.get('code','')))
+    elif self.path.endswith('/assignments'): r=enterprise.set_assignment(c,d.get('email'),d.get('code'),d.get('note','')); audit(c,'department_assign',json.dumps({'email':str(d.get('email','')).lower(),'code':d.get('code') or None},ensure_ascii=False))
+    else: r=enterprise.save_department(c,d); audit(c,'department_save',json.dumps(r,ensure_ascii=False))
+   except enterprise.EnterpriseError as e: return self.out({'error':str(e)},e.status)
+   return self.out({'departments':enterprise.list_departments(c),'assignments':enterprise.list_assignments(c)})
+  if self.path=='/api/admin/login-im':
+   try: result,code=enterprise.change_login_im(c,d.get('im'),d.get('confirm') is True)
+   except enterprise.EnterpriseError as e: return self.out({'error':str(e),**e.data},e.status)
+   audit(c,'login_im_set',json.dumps({'actor':actor,'im':result['im'],'previous':result['previous'],'sync':result['sync']['status'],'failed':result['sync'].get('failed',[])},ensure_ascii=False))
+   return self.out(result,code)
+  if self.path=='/api/admin/sso/link':
+   if not enterprise.sso_enabled(): return self.out({'error':'未启用企业登录'},404)
+   email=(admin_email(c,actor) or actor).lower()
+   try: link=enterprise.create_link(c,email)
+   except enterprise.EnterpriseError as e: return self.out({'error':str(e)},e.status)
+   audit(c,'sso_link_start',email); return self.out({'url':'/api/sso/start?link='+link,'expiresIn':enterprise.LINK_SECONDS})
+  if self.path=='/api/admin/sso/unlink':
+   target=str(d.get('email') or actor).strip().lower()
+   if target!=actor.lower() and actor!=EMAIL: return self.out({'error':'owner_required'},403)
+   removed=enterprise.unlink(c,target); audit(c,'sso_unlink',json.dumps({'actor':actor,'email':target},ensure_ascii=False))
+   if not removed: return self.out({'error':'没有这条关联'},404)
+   return self.out({'ok':True,'bindings':enterprise.list_bindings(c) if actor==EMAIL else enterprise.list_bindings(c,actor)})
   if self.path=='/api/config':
-   for k,v in d.items():c.execute('insert into config(k,v,updated) values(?,?,?) on conflict(k) do update set v=excluded.v,updated=excluded.updated',(k,str(v),int(time.time())))
+   try:
+    for name in ('defaultModel','baseURL','apiKey'): check_config_value(name,d.get(name))
+   except ValueError as e: return self.out({'error':str(e)},400)
+   # The API key goes only to librechat.env; storing it here would echo it back through GET /api/config.
+   for k,v in d.items():
+    if k!='apiKey': c.execute('insert into config(k,v,updated) values(?,?,?) on conflict(k) do update set v=excluded.v,updated=excluded.updated',(k,str(v),int(time.time())))
    save_real_config(d.get('defaultModel')); save_endpoint(d.get('baseURL'),d.get('apiKey')); audit(c,'save_config','endpoint/model'); return self.out({'ok':True,'models':models()})
   self.out({'error':'not_found'},404)
-HTML="""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Jadmin</title><style>body{font:15px system-ui;margin:0;background:#f6f7fb;color:#172033}main{max-width:1100px;margin:auto;padding:24px}.card{background:white;border:1px solid #e3e7ef;border-radius:14px;padding:18px;margin:14px 0;box-shadow:0 2px 8px #1720330d}input,select,button{padding:9px 11px;margin:4px;border:1px solid #ccd3df;border-radius:8px}button{background:#2563eb;color:white;border:0;cursor:pointer}.danger{background:#dc2626}.muted{color:#667085}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:9px;border-bottom:1px solid #edf0f5}pre{background:#f8fafc;padding:12px;border-radius:8px;white-space:pre-wrap}.ok{color:#16803c}.bad{color:#b42318}</style><main><h1>Jadmin</h1><p class=muted>Jchat · Jimage · JAPI</p><section id=loginbox class=card><h2>管理员登录</h2><input id=email placeholder=邮箱 autocomplete=username><input id=password type=password placeholder=密码 autocomplete=current-password><button id=loginbtn>登录</button><p id=msg></p></section><div id=app hidden><section class=card><h2>服务状态</h2><pre id=health></pre><button id=refresh>刷新</button></section><section class=card><h2>用户管理</h2><input id=newemail placeholder=用户邮箱><input id=newpassword type=password placeholder=初始密码（可留空自动生成）><select id=role><option>USER</option><option>ADMIN</option></select><button id=addbtn>创建用户</button><p id=notice></p><table><thead><tr><th>邮箱</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody id=rows></tbody></table></section><section class=card><h2>统一配置</h2><p>API 地址</p><input id=baseURL size=42><p>统一 API Key（留空保持原值）</p><input id=apiKey type=password size=42 placeholder="当前 Key 已隐藏"><p>模型</p><select id=model></select><button id=savebtn>保存默认模型</button><button id=loadmodels>重新拉取模型</button><div id=config></div></section><section class=card><h2>审计记录</h2><div id=audit></div></section></div></main><script>var token='';const $=id=>document.getElementById(id);async function api(u,o={}){o.headers=Object.assign({'Content-Type':'application/json','Authorization':'Bearer '+token},o.headers||{});let r=await fetch(u,o),x=await r.json();if(!r.ok)throw Error(x.error||'请求失败');return x}async function load(){let [h,u,c,a,m]=await Promise.all([api('/api/health'),api('/api/users'),api('/api/config'),api('/api/audit'),api('/api/metrics')]);$('health').innerHTML=Object.entries(h).map(([k,v])=>k+': '+(v?'正常':'异常')).join('\\n')+'\\n\\nCPU: '+m.current.cpu+'%\\n内存: '+m.current.memory+'%\\n磁盘: '+m.current.disk+'%\\nDocker容器: '+m.current.containers.length+'\\n历史采样: '+m.history.length;$('baseURL').value=c.current.customBaseURL||'';$('config').replaceChildren();let ct=document.createElement('table');ct.innerHTML='<tbody></tbody>';[['API Key状态',c.current.keyConfigured?'已配置':'未配置'],['Key末四位',c.current.keySuffix||'—'],['客户端域名',c.current.domainClient||'—'],['统一API地址',c.current.customBaseURL||'—']].forEach(x=>{let tr=document.createElement('tr');let th=document.createElement('th');let td=document.createElement('td');th.textContent=x[0];td.textContent=x[1];tr.append(th,td);ct.querySelector('tbody').appendChild(tr)});$('config').appendChild(ct);$('audit').replaceChildren();let at=document.createElement('table');at.innerHTML='<thead><tr><th>时间</th><th>操作</th><th>详情</th></tr></thead><tbody></tbody>';(a.audit||[]).forEach(x=>{let tr=document.createElement('tr');[new Date(x.at*1000).toLocaleString(),x.action,x.detail].forEach(v=>{let td=document.createElement('td');td.textContent=v||'—';tr.appendChild(td)});at.querySelector('tbody').appendChild(tr)});$('audit').appendChild(at);$('rows').innerHTML=u.users.map(x=>'<tr><td>'+x.email+'</td><td>'+x.role+'</td><td class="'+(x.enabled?'ok':'bad')+'">'+(x.enabled?'启用':'停用')+'</td><td><button data-id="'+x.id+'" data-enabled="'+x.enabled+'">'+(x.enabled?'停用':'启用')+'</button> <button class=danger data-reset="'+x.id+'">重置密码</button></td></tr>').join('');document.querySelectorAll('[data-id]').forEach(b=>b.onclick=async()=>{await api('/api/users/'+(b.dataset.enabled==='1'?'disable':'enable'),{method:'POST',body:JSON.stringify({id:b.dataset.id})});load()});document.querySelectorAll('[data-reset]').forEach(b=>b.onclick=async()=>{let x=await api('/api/users/reset-password',{method:'POST',body:JSON.stringify({id:b.dataset.reset})});alert('临时密码：'+x.temporaryPassword)});}$('loginbtn').onclick=async()=>{try{let x=await api('/api/login',{method:'POST',body:JSON.stringify({email:$('email').value,password:$('password').value})});token=x.token;$('loginbox').hidden=true;$('app').hidden=false;load()}catch(e){$('msg').textContent=e.message;$('msg').className='bad'}};$('refresh').onclick=load;$('addbtn').onclick=async()=>{try{let x=await api('/api/users',{method:'POST',body:JSON.stringify({email:$('newemail').value,password:$('newpassword').value,role:$('role').value})});$('notice').textContent='创建成功，临时密码：'+x.temporaryPassword;$('newemail').value='';load()}catch(e){$('notice').textContent=e.message}};$('savebtn').onclick=async()=>{await api('/api/config',{method:'POST',body:JSON.stringify({defaultModel:$('model').value,baseURL:$('baseURL').value,apiKey:$('apiKey').value})});load()};</script>"""
+HTML="""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Jadmin</title><style>body{font:15px system-ui;margin:0;background:#f6f7fb;color:#172033}main{max-width:1100px;margin:auto;padding:24px}.card{background:white;border:1px solid #e3e7ef;border-radius:14px;padding:18px;margin:14px 0;box-shadow:0 2px 8px #1720330d}input,select,button{padding:9px 11px;margin:4px;border:1px solid #ccd3df;border-radius:8px}button{background:#2563eb;color:white;border:0;cursor:pointer}.danger{background:#dc2626}.muted{color:#667085}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:9px;border-bottom:1px solid #edf0f5}pre{background:#f8fafc;padding:12px;border-radius:8px;white-space:pre-wrap}.ok{color:#16803c}.bad{color:#b42318}</style><main><h1>Jadmin</h1><p class=muted>Jchat · Jimage · JAPI</p><section id=loginbox class=card><h2>管理员登录</h2><input id=email placeholder=邮箱 autocomplete=username><input id=password type=password placeholder=密码 autocomplete=current-password><button id=loginbtn>登录</button><p id=msg></p></section><div id=app hidden><section class=card><h2>服务状态</h2><pre id=health></pre><button id=refresh>刷新</button></section><section class=card><h2>用户管理</h2><input id=newemail placeholder=用户邮箱><input id=newpassword type=password placeholder=初始密码（可留空自动生成）><select id=role><option>USER</option><option>ADMIN</option></select><button id=addbtn>创建用户</button><p id=notice></p><table><thead><tr><th>邮箱</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody id=rows></tbody></table></section><section class=card><h2>统一配置</h2><p>API 地址</p><input id=baseURL size=42><p>统一 API Key（留空保持原值）</p><input id=apiKey type=password size=42 placeholder="当前 Key 已隐藏"><p>模型</p><select id=model></select><button id=savebtn>保存默认模型</button><button id=loadmodels>重新拉取模型</button><div id=config></div></section><section class=card><h2>审计记录</h2><div id=audit></div></section></div></main><script>var token='';const $=id=>document.getElementById(id);async function api(u,o={}){o.headers=Object.assign({'Content-Type':'application/json','Authorization':'Bearer '+token},o.headers||{});let r=await fetch(u,o),x=await r.json();if(!r.ok)throw Error(x.error||'请求失败');return x}async function load(){let [h,u,c,a,m]=await Promise.all([api('/api/health'),api('/api/users'),api('/api/config'),api('/api/audit'),api('/api/metrics')]);$('health').textContent=Object.entries(h).map(([k,v])=>k+': '+(v?'正常':'异常')).join('\\n')+'\\n\\nCPU: '+m.current.cpu+'%\\n内存: '+m.current.memory+'%\\n磁盘: '+m.current.disk+'%\\nDocker容器: '+m.current.containers.length+'\\n历史采样: '+m.history.length;$('baseURL').value=c.current.customBaseURL||'';$('config').replaceChildren();let ct=document.createElement('table');ct.innerHTML='<tbody></tbody>';[['API Key状态',c.current.keyConfigured?'已配置':'未配置'],['Key末四位',c.current.keySuffix||'—'],['客户端域名',c.current.domainClient||'—'],['统一API地址',c.current.customBaseURL||'—']].forEach(x=>{let tr=document.createElement('tr');let th=document.createElement('th');let td=document.createElement('td');th.textContent=x[0];td.textContent=x[1];tr.append(th,td);ct.querySelector('tbody').appendChild(tr)});$('config').appendChild(ct);$('audit').replaceChildren();let at=document.createElement('table');at.innerHTML='<thead><tr><th>时间</th><th>操作</th><th>详情</th></tr></thead><tbody></tbody>';(a.audit||[]).forEach(x=>{let tr=document.createElement('tr');[new Date(x.at*1000).toLocaleString(),x.action,x.detail].forEach(v=>{let td=document.createElement('td');td.textContent=v||'—';tr.appendChild(td)});at.querySelector('tbody').appendChild(tr)});$('audit').appendChild(at);$('rows').replaceChildren();u.users.forEach(x=>{let tr=document.createElement('tr');let cell=(text,cls)=>{let td=document.createElement('td');td.textContent=text;if(cls)td.className=cls;tr.appendChild(td);return td};cell(x.email||'—');cell(x.role||'—');cell(x.enabled?'启用':'停用',x.enabled?'ok':'bad');let ops=cell('');let toggle=document.createElement('button');toggle.textContent=x.enabled?'停用':'启用';toggle.onclick=async()=>{await api('/api/users/'+(x.enabled?'disable':'enable'),{method:'POST',body:JSON.stringify({id:x.id})});load()};let reset=document.createElement('button');reset.className='danger';reset.textContent='重置密码';reset.onclick=async()=>{let y=await api('/api/users/reset-password',{method:'POST',body:JSON.stringify({id:x.id})});alert('临时密码：'+y.temporaryPassword)};ops.append(toggle,' ',reset);$('rows').appendChild(tr)});}$('loginbtn').onclick=async()=>{try{let x=await api('/api/login',{method:'POST',body:JSON.stringify({email:$('email').value,password:$('password').value})});token=x.token;$('loginbox').hidden=true;$('app').hidden=false;load()}catch(e){$('msg').textContent=e.message;$('msg').className='bad'}};$('refresh').onclick=load;$('addbtn').onclick=async()=>{try{let x=await api('/api/users',{method:'POST',body:JSON.stringify({email:$('newemail').value,password:$('newpassword').value,role:$('role').value})});$('notice').textContent='创建成功，临时密码：'+x.temporaryPassword;$('newemail').value='';load()}catch(e){$('notice').textContent=e.message}};$('savebtn').onclick=async()=>{await api('/api/config',{method:'POST',body:JSON.stringify({defaultModel:$('model').value,baseURL:$('baseURL').value,apiKey:$('apiKey').value})});load()};</script>"""
 from pathlib import Path
 HTML=HTML.replace('</script>', '</script><script>'+Path(__file__).with_name('models-ui.js').read_text(encoding='utf-8')+'</script><script>'+Path(__file__).with_name('modules-ui.js').read_text(encoding='utf-8')+'</script>',1)
 HTML += '<script>'+Path(__file__).with_name('setup-ui.js').read_text(encoding='utf-8')+'</script>'
+HTML += '<script>'+Path(__file__).with_name('enterprise-ui.js').read_text(encoding='utf-8')+'</script>'
+def script_hashes(page):
+ import re
+ return ["'sha256-"+base64.b64encode(hashlib.sha256(s.encode()).digest()).decode()+"'" for s in re.findall(r'<script>([\s\S]*?)</script>',page)]
+# The page is static, so its inline scripts are allowed by hash instead of 'unsafe-inline'.
+CSP=CSP.replace("script-src 'self' 'unsafe-inline'","script-src 'self' "+' '.join(script_hashes(HTML)))
 def main():
- db()
+ if len(KEY)<32: raise SystemExit('ADMIN_SECRET 至少需要 32 个字符（例如 python3 -c "import secrets;print(secrets.token_hex(32))"）')
+ init_db()
  threading.Thread(target=collect_metrics,daemon=True).start()
  port=int(os.environ.get('ADMIN_PORT','8090'))
  ThreadingHTTPServer((os.environ.get('ADMIN_HOST','127.0.0.1'),port),H).serve_forever()

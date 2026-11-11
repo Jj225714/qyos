@@ -14,6 +14,19 @@ Environment=CONFIG_VAULT_ADMIN_FILE=${PRIVATE_DIR}/vault-admins.json
 Environment=CONFIG_VAULT_ADMIN_CLI=${INSTALL_DIR}/config-vault/admin-users.mjs
 Environment=ADMIN_HOST=127.0.0.1
 Environment=ADMIN_PORT=8090
+# 企业OS（可选）：Casdoor 登录、部门目录、os-bridge 部门接口
+Environment=CASDOOR_URL=https://sso.${DOMAIN}
+Environment=CASDOOR_ORG=${CASDOOR_ORG}
+Environment=CASDOOR_CLIENT_ID=${CASDOOR_JADMIN_CLIENT_ID}
+Environment=CASDOOR_CLIENT_SECRET_FILE=${PRIVATE_DIR}/jadmin-casdoor.secret
+Environment=JADMIN_ORIGIN=https://jadmin.${DOMAIN}
+Environment=OS_BRIDGE_TOKEN_FILE=${PRIVATE_DIR}/os-bridge-jadmin.token
+# 登录方式（飞书 / 企业微信 / 钉钉三选一）：专用 Casdoor 全局管理员的 accessKey/accessSecret，用于修改应用的登录提供商。
+# 两个文件不存在时，后台只保存设置并给出手动调整步骤。
+Environment=CASDOOR_ADMIN_ACCESS_KEY_FILE=${PRIVATE_DIR}/casdoor-admin.accesskey
+Environment=CASDOOR_ADMIN_ACCESS_SECRET_FILE=${PRIVATE_DIR}/casdoor-admin.accesssecret
+Environment=CASDOOR_APPS=jchat,jimage,jadmin
+Environment=CASDOOR_IM_PROVIDERS=lark=provider_lark,wecom=provider_wecom,dingtalk=provider_dingtalk
 ExecStart=/usr/bin/python3 ${INSTALL_DIR}/admin-panel/server.py
 Restart=always
 [Install]
