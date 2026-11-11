@@ -1,0 +1,205 @@
+// Copyright 2022 The Casdoor Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package controllers
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/casdoor/casdoor/edition"
+	"github.com/casdoor/casdoor/upgrade"
+	"github.com/casdoor/casdoor/util"
+	"github.com/go-git/go-git/v5"
+)
+
+// GetSystemInfo
+// @Title GetSystemInfo
+// @Tag System API
+// @Description get system info like CPU and memory usage
+// @Success 200 {object} util.SystemInfo The Response object
+// @router /get-system-info [get]
+func (c *ApiController) GetSystemInfo() {
+	if !c.RequireGlobalAdmin() {
+		return
+	}
+
+	systemInfo, err := util.GetSystemInfo()
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	c.ResponseOk(systemInfo)
+}
+
+// GetVersionInfo
+// @Title GetVersionInfo
+// @Tag System API
+// @Description get version info like Casdoor release version and commit ID
+// @Success 200 {object} util.VersionInfo The Response object
+// @router /get-version-info [get]
+func (c *ApiController) GetVersionInfo() {
+	versionInfo, err := util.GetVersionInfo()
+	if err != nil && !errors.Is(err, git.ErrRepositoryNotExists) {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	if versionInfo.Version != "" {
+		c.ResponseOk(versionInfo)
+		return
+	}
+
+	c.ResponseOk(util.GetBuiltInVersionInfo())
+}
+
+// GetLicense
+// @Title GetLicense
+// @Tag System API
+// @Description get the edition that the license of this Casdoor gives, and for a global admin the license details
+// @Success 200 {object} edition.LicenseInfo The Response object
+// @router /get-license [get]
+func (c *ApiController) GetLicense() {
+	info := edition.GetLicenseInfo()
+	if !c.IsGlobalAdmin() {
+		info = &edition.LicenseInfo{Edition: info.Edition, Features: info.Features}
+	}
+
+	c.ResponseOk(info)
+}
+
+// GetUpgradeInfo
+// @Title GetUpgradeInfo
+// @Tag System API
+// @Description get the latest Casdoor release, how this Casdoor is deployed and the progress of an upgrade
+// @Success 200 {object} upgrade.UpgradeInfo The Response object
+// @router /get-upgrade-info [get]
+func (c *ApiController) GetUpgradeInfo() {
+	if !c.RequireGlobalAdmin() {
+		return
+	}
+
+	c.ResponseOk(upgrade.GetUpgradeInfo())
+}
+
+// UpgradeSystem
+// @Title UpgradeSystem
+// @Tag System API
+// @Description upgrade an official release binary of Casdoor to the latest release and restart it
+// @Param   body    body   string  true        "The JSON {version}, the release to upgrade to, which must be the latest one"
+// @Success 200 {object} controllers.Response The Response object
+// @router /upgrade-system [post]
+func (c *ApiController) UpgradeSystem() {
+	if !c.RequireGlobalAdmin() {
+		return
+	}
+
+	if !strings.HasPrefix(c.Ctx.Input.Header("Content-Type"), "application/json") {
+		c.ResponseError("the request body must be JSON")
+		return
+	}
+
+	var req struct {
+		Version string `json:"version"`
+	}
+	err := json.Unmarshal(c.Ctx.Input.RequestBody, &req)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	err = upgrade.StartUpgrade(req.Version, c.GetSessionUsername())
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	c.ResponseOk()
+}
+
+// GetLicenseReport
+// @Title GetLicenseReport
+// @Tag System API
+// @Description get the report of this Casdoor's license, environment and upgrades, for an instance that cannot reach the license server to send to the vendor
+// @Success 200 {string} The Response object
+// @router /get-license-report [get]
+func (c *ApiController) GetLicenseReport() {
+	if !c.RequireGlobalAdmin() {
+		return
+	}
+
+	report, err := edition.GetOfflineReport()
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	c.ResponseOk(report)
+}
+
+// UploadUpgradePackage
+// @Title UploadUpgradePackage
+// @Tag System API
+// @Description upgrade a Casdoor without Internet access from an uploaded official release package and the offline upgrade order from the vendor
+// @Param   order    formData   string  true        "The offline upgrade order"
+// @Param   file     formData   file    true        "The release package, e.g. casdoor_Linux_x86_64.tar.gz"
+// @Success 200 {object} controllers.Response The Response object
+// @router /upload-upgrade-package [post]
+func (c *ApiController) UploadUpgradePackage() {
+	if !c.RequireGlobalAdmin() {
+		return
+	}
+
+	file, _, err := c.GetFile("file")
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+	defer file.Close()
+
+	tempFile, err := os.CreateTemp("", "casdoor-upgrade-*")
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+	_, err = io.Copy(tempFile, file)
+	closeErr := tempFile.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = upgrade.InstallUploadedPackage(c.GetString("order"), tempFile.Name(), c.GetSessionUsername())
+	}
+	if err != nil {
+		_ = os.Remove(tempFile.Name())
+		c.ResponseError(err.Error())
+		return
+	}
+
+	c.ResponseOk()
+}
+
+// Health
+// @Title Health
+// @Tag System API
+// @Description check if the system is live
+// @Success 200 {object} controllers.Response The Response object
+// @router /health [get]
+func (c *ApiController) Health() {
+	c.ResponseOk()
+}

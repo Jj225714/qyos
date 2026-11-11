@@ -1,0 +1,228 @@
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from '@/components/ui/accordion';
+import { Operator } from '@/constants/agent';
+import { RestrictedUpstreamMap } from '@/pages/agent/constant';
+import { PropsWithChildren, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import useGraphStore from '../../../store';
+import { buildPipelineNextOperators } from '../../../utils/pipeline-connection';
+import { OperatorItemList } from './operator-item-list';
+
+function OperatorAccordionTrigger({ children }: PropsWithChildren) {
+  return (
+    <AccordionTrigger className="text-xs text-text-secondary hover:no-underline items-center">
+      <span className="h-4 translate-y-1"> {children}</span>
+    </AccordionTrigger>
+  );
+}
+
+export function AccordionOperators({
+  isCustomDropdown = false,
+  mousePosition,
+  nodeId,
+}: {
+  isCustomDropdown?: boolean;
+  mousePosition?: { x: number; y: number };
+  nodeId?: string;
+}) {
+  const { t } = useTranslation();
+  const { getOperatorTypeFromId, getParentIdById } = useGraphStore(
+    (state) => state,
+  );
+
+  const exitLoopList = useMemo(() => {
+    if (getOperatorTypeFromId(getParentIdById(nodeId)) === Operator.Loop) {
+      return [Operator.ExitLoop];
+    }
+    return [];
+  }, [getOperatorTypeFromId, getParentIdById, nodeId]);
+
+  const allow = useMemo(() => {
+    const source = getOperatorTypeFromId(nodeId) as Operator | undefined;
+    const blocked = new Set<Operator>(
+      source && source in RestrictedUpstreamMap
+        ? RestrictedUpstreamMap[source as keyof typeof RestrictedUpstreamMap]
+        : [],
+    );
+    return (operators: Operator[]) =>
+      operators.filter((operator) => !blocked.has(operator));
+  }, [getOperatorTypeFromId, nodeId]);
+
+  const foundation = allow([Operator.Agent, Operator.Retrieval]);
+  const dialog = allow([Operator.Message, Operator.UserFillUp]);
+  const flow = allow([
+    Operator.Switch,
+    Operator.Iteration,
+    Operator.Loop,
+    ...exitLoopList,
+    Operator.Categorize,
+  ]);
+  const data = allow([
+    Operator.Code,
+    Operator.StringTransform,
+    Operator.DataOperations,
+    Operator.VariableAssigner,
+    Operator.ListOperations,
+    Operator.VariableAggregator,
+  ]);
+  const tools = allow([
+    Operator.TavilySearch,
+    Operator.TavilyExtract,
+    Operator.QueritContents,
+    Operator.QueritSearch,
+    Operator.ExeSQL,
+    Operator.Google,
+    Operator.YahooFinance,
+    Operator.Email,
+    Operator.DuckDuckGo,
+    Operator.Wikipedia,
+    Operator.GoogleScholar,
+    Operator.ArXiv,
+    Operator.PubMed,
+    Operator.BGPT,
+    Operator.GitHub,
+    Operator.Invoke,
+    Operator.WenCai,
+    Operator.SearXNG,
+    Operator.KeenableSearch,
+    Operator.YouComSearch,
+    Operator.SofyaSearch,
+    Operator.Search1APISearch,
+    Operator.Search1APICrawl,
+    Operator.DocGenerator,
+  ]);
+
+  return (
+    <Accordion
+      type="multiple"
+      className="px-2 text-text-title max-h-[45vh] overflow-auto"
+      defaultValue={['item-1', 'item-2', 'item-3', 'item-4', 'item-5']}
+    >
+      {foundation.length > 0 && (
+        <AccordionItem value="item-1">
+          <OperatorAccordionTrigger>
+            {t('flow.foundation')}
+          </OperatorAccordionTrigger>
+          <AccordionContent className="flex flex-col gap-4 text-text-primary">
+            <OperatorItemList
+              operators={foundation}
+              isCustomDropdown={isCustomDropdown}
+              mousePosition={mousePosition}
+            ></OperatorItemList>
+          </AccordionContent>
+        </AccordionItem>
+      )}
+      {dialog.length > 0 && (
+        <AccordionItem value="item-2">
+          <OperatorAccordionTrigger>
+            {t('flow.dialog')}
+          </OperatorAccordionTrigger>
+          <AccordionContent className="flex flex-col gap-4 text-text-primary">
+            <OperatorItemList
+              operators={dialog}
+              isCustomDropdown={isCustomDropdown}
+              mousePosition={mousePosition}
+            ></OperatorItemList>
+          </AccordionContent>
+        </AccordionItem>
+      )}
+      {flow.length > 0 && (
+        <AccordionItem value="item-3">
+          <OperatorAccordionTrigger>{t('flow.flow')}</OperatorAccordionTrigger>
+          <AccordionContent className="flex flex-col gap-4 text-text-primary">
+            <OperatorItemList
+              operators={flow}
+              isCustomDropdown={isCustomDropdown}
+              mousePosition={mousePosition}
+            ></OperatorItemList>
+          </AccordionContent>
+        </AccordionItem>
+      )}
+      {data.length > 0 && (
+        <AccordionItem value="item-4">
+          <OperatorAccordionTrigger>
+            {t('flow.dataManipulation')}
+          </OperatorAccordionTrigger>
+          <AccordionContent className="flex flex-col gap-4 text-text-primary">
+            <OperatorItemList
+              operators={data}
+              isCustomDropdown={isCustomDropdown}
+              mousePosition={mousePosition}
+            ></OperatorItemList>
+          </AccordionContent>
+        </AccordionItem>
+      )}
+      {tools.length > 0 && (
+        <AccordionItem value="item-5">
+          <OperatorAccordionTrigger>{t('flow.tools')}</OperatorAccordionTrigger>
+          <AccordionContent className="flex flex-col gap-4 text-text-primary">
+            <OperatorItemList
+              operators={tools}
+              isCustomDropdown={isCustomDropdown}
+              mousePosition={mousePosition}
+            ></OperatorItemList>
+          </AccordionContent>
+        </AccordionItem>
+      )}
+    </Accordion>
+  );
+}
+
+export function PipelineAccordionOperators({
+  isCustomDropdown = false,
+  mousePosition,
+  nodeId,
+}: {
+  isCustomDropdown?: boolean;
+  mousePosition?: { x: number; y: number };
+  nodeId?: string;
+}) {
+  const { findNodeByName, getOperatorTypeFromId } = useGraphStore(
+    (state) => state,
+  );
+  const sourceOperator = getOperatorTypeFromId(nodeId) as Operator | undefined;
+
+  const { operators, chunkerOperators, showChunker } = useMemo(
+    () =>
+      buildPipelineNextOperators(
+        sourceOperator,
+        (operator) => !!findNodeByName(operator),
+      ),
+    [findNodeByName, sourceOperator],
+  );
+
+  return (
+    <>
+      <OperatorItemList
+        operators={operators}
+        isCustomDropdown={isCustomDropdown}
+        mousePosition={mousePosition}
+      ></OperatorItemList>
+      {showChunker && (
+        <Accordion
+          type="single"
+          collapsible
+          className="w-full px-4"
+          defaultValue="item-1"
+        >
+          <AccordionItem value="item-1">
+            <AccordionTrigger className="translate-y-2 hover:no-underline text-text-primary font-normal">
+              Chunker
+            </AccordionTrigger>
+            <AccordionContent className="flex flex-col gap-4">
+              <OperatorItemList
+                operators={chunkerOperators}
+                isCustomDropdown={isCustomDropdown}
+                mousePosition={mousePosition}
+              ></OperatorItemList>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
+      )}
+    </>
+  );
+}

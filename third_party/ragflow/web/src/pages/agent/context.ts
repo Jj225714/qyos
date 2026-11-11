@@ -1,0 +1,87 @@
+import { INodeEvent } from '@/hooks/use-send-message';
+import { DSL, IGraph, RAGFlowNodeType } from '@/interfaces/database/agent';
+import { IMessage } from '@/interfaces/database/chat';
+import { HandleType, Position } from '@xyflow/react';
+import { Dispatch, SetStateAction, createContext, useContext } from 'react';
+import { useAddNode } from './hooks/use-add-node';
+import { useCacheChatLog } from './hooks/use-cache-chat-log';
+import { useShowFormDrawer, useShowLogSheet } from './hooks/use-show-drawer';
+
+export const AgentFormContext = createContext<RAGFlowNodeType | undefined>(
+  undefined,
+);
+
+export const OwnerTenantIdContext = createContext<string | undefined>(
+  undefined,
+);
+
+// oxlint-disable-next-line react-refresh/only-export-components
+export const useOwnerTenantId = () => useContext(OwnerTenantIdContext);
+
+// CanvasReadonlyContext marks the canvas as view-only (e.g. the built-in
+// pipeline preview page). Node/toolbar/form components consume it to disable
+// every editing entry point while keeping viewing interactions (pan, zoom,
+// selection highlight, opening the parameter sheet) intact.
+export const CanvasReadonlyContext = createContext(false);
+
+// oxlint-disable-next-line react-refresh/only-export-components
+export const useCanvasReadonly = () => useContext(CanvasReadonlyContext);
+
+// CanvasSnapshotContext carries one immutable canvas snapshot (graph plus
+// globals/conversation variables) for read-only previews such as the version
+// history dialog. Variable-resolution hooks prefer it over the live canvas
+// store so a previewed version resolves variables against its own graph
+// instead of the current draft.
+export type CanvasSnapshot = IGraph & Pick<DSL, 'globals' | 'variables'>;
+
+export const CanvasSnapshotContext = createContext<CanvasSnapshot | null>(null);
+
+// oxlint-disable-next-line react-refresh/only-export-components
+export const useCanvasSnapshot = () => useContext(CanvasSnapshotContext);
+
+type AgentInstanceContextType = Pick<
+  ReturnType<typeof useAddNode>,
+  'addCanvasNode'
+> &
+  Pick<ReturnType<typeof useShowFormDrawer>, 'showFormDrawer'> & {
+    lastNode?: INodeEvent | null;
+    currentSendLoading?: boolean;
+    startButNotFinishedNodeIds?: string[];
+  };
+
+export const AgentInstanceContext = createContext<AgentInstanceContextType>(
+  {} as AgentInstanceContextType,
+);
+
+type AgentChatContextType = Pick<
+  ReturnType<typeof useShowLogSheet>,
+  'showLogSheet'
+> & {
+  setLastSendLoadingFunc: (loading: boolean, messageId: string) => void;
+  setDerivedMessages: Dispatch<SetStateAction<IMessage[] | undefined>>;
+};
+
+export const AgentChatContext = createContext<AgentChatContextType>(
+  {} as AgentChatContextType,
+);
+
+type AgentChatLogContextType = Pick<
+  ReturnType<typeof useCacheChatLog>,
+  'addEventList' | 'setCurrentMessageId'
+>;
+
+export const AgentChatLogContext = createContext<AgentChatLogContextType>(
+  {} as AgentChatLogContextType,
+);
+
+export type HandleContextType = {
+  nodeId?: string;
+  id?: string;
+  type: HandleType;
+  position: Position;
+  isFromConnectionDrag: boolean;
+};
+
+export const HandleContext = createContext<HandleContextType>(
+  {} as HandleContextType,
+);

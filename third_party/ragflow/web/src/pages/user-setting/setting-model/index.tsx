@@ -1,0 +1,221 @@
+/*
+ *  Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+import Spotlight from '@/components/spotlight';
+import { ProviderInstanceCardWithPrivilege } from '@/ee/pages/user-setting/setting-model/provider-instance-card-with-privilege';
+import { useTranslate } from '@/hooks/common-hooks';
+import {
+  useFetchAddedProviders,
+  useFetchProviderInstances,
+} from '@/hooks/use-llm-request';
+import { IProviderInstance } from '@/interfaces/database/llm';
+import { Plus } from 'lucide-react';
+import { FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { InstanceSavePayload } from './instance-card/interface';
+import { ProviderInstanceCard } from './instance-card/provider-instance-card';
+import { ProviderHeaderBar } from './layout/provider-header-bar';
+import { Sidebar, SidebarSelection } from './layout/sidebar';
+import SystemSetting from './layout/system-setting';
+
+/**
+ * Sidebar-driven model provider settings page.
+ *
+ * Layout:
+ *  - Left: `Sidebar` (Default-models entry, search, provider list).
+ *  - Right:
+ *      * 'default' selection -> `SystemSetting`.
+ *      * provider selection  -> a sticky `ProviderHeaderBar` at the top,
+ *        a vertical stack of `ProviderInstanceCard` in the middle, and a
+ *        sticky "+ Instance" button at the bottom. Each click of that
+ *        button adds a new draft card; multiple drafts can coexist.
+ *
+ * Save flow: each instance card owns its Save button and persists only
+ * its own instance (drafts via `addProviderInstance`, saved cards via
+ * `updateProviderInstance`). The page just reacts to a draft being
+ * persisted by dropping its card and expanding the persisted one.
+ *
+ * Special-case providers (handled inside `ProviderInstanceCard`):
+ *  - `Bedrock`: rendered inline via `BedrockInstanceCard`.
+ *  - All other providers (including SoMark) use the generic
+ *    `GenericProviderInstanceCard` path.
+ */
+const SettingModelV2: FC = () => {
+  const { t: tSetting } = useTranslate('setting');
+  const [selection, setSelection] = useState<SidebarSelection>('default');
+  // Stack of draft-instance identifiers, rendered as `ProviderInstanceCard`
+  // entries below the persisted instances. Each draft is saved or
+  // cancelled from its own card.
+  const [draftIds, setDraftIds] = useState<string[]>([]);
+
+  // Tracks the instance name that was just persisted from a draft card.
+  // The corresponding saved card mounts expanded so the user can
+  // immediately see (and edit) what was just saved. Reset on every
+  // selection change so it does not bleed across providers.
+  const [newlySavedInstanceName, setNewlySavedInstanceName] = useState<
+    string | null
+  >(null);
+
+  // Monotonic counter so each draft card has a stable, unique React key.
+  const draftIdCounterRef = useRef(0);
+  // Tracks whether the user explicitly cancelled the auto-shown draft
+  // for the current selection. Reset on every selection change.
+  const cancelledRef = useRef(false);
+
+  const { data: addedProviders } = useFetchAddedProviders();
+  const providerQueryName = useMemo(() => {
+    if (selection === 'default') return '';
+    return addedProviders.some((p) => p.name === selection && p.has_instance)
+      ? selection
+      : '';
+  }, [selection, addedProviders]);
+  const { data: instances, loading: instancesLoading } =
+    useFetchProviderInstances(providerQueryName);
+
+  // Append a new draft id to the visible list.
+  const addDraft = useCallback(() => {
+    draftIdCounterRef.current += 1;
+    const id = `draft-${draftIdCounterRef.current}`;
+    setDraftIds((prev) => [...prev, id]);
+  }, []);
+
+  // Remove a draft id from the visible list (called on cancel).
+  const removeDraft = useCallback((id: string) => {
+    setDraftIds((prev) => prev.filter((d) => d !== id));
+  }, []);
+
+  // When the selection changes, clear the cancelled flag, drop any
+  // in-flight drafts, and reset the just-saved marker.
+  useEffect(() => {
+    cancelledRef.current = false;
+    setDraftIds([]);
+    setNewlySavedInstanceName(null);
+  }, [selection]);
+
+  // If the user switches to a provider with no existing instances and
+  // no drafts already on screen, auto-show a "new instance" draft so
+  // they can fill it in immediately. If they have explicitly cancelled,
+  // do not re-show.
+  //
+  // Wait for the provider-instances query to settle before deciding:
+  // `initialData: []` on the hook means `instances` is an empty array
+  // from the first render, so a naive length check would auto-spawn a
+  // draft during the brief loading window even when the provider
+  // already has saved instances, only to remove it once the query
+  // resolves. Gating on `!instancesLoading` skips that flicker and
+  // keeps the UI clean for providers that do have instances.
+  useEffect(() => {
+    if (selection === 'default' || cancelledRef.current) return;
+    if (instancesLoading) return;
+    if (instances.length === 0 && draftIds.length === 0) {
+      addDraft();
+    }
+  }, [selection, instances, instancesLoading, draftIds, addDraft]);
+
+  // User clicked Cancel on a specific draft - remove it from the list
+  // and stop the auto-show effect from re-opening it for the current
+  // empty-instance selection.
+  const handleDraftCancel = useCallback(
+    (id: string) => {
+      cancelledRef.current = true;
+      removeDraft(id);
+    },
+    [removeDraft],
+  );
+
+  // A draft card persisted its instance. Drop the draft card and pin the
+  // auto-show guard so a new draft isn't re-spawned while the instances
+  // refetch is in flight (during that window both `instances` and
+  // `draftIds` are empty and would otherwise re-trigger `addDraft()`).
+  // The saved name makes the persisted card mount expanded.
+  const handleDraftSaved = useCallback(
+    (draftId: string) => (payload: InstanceSavePayload) => {
+      cancelledRef.current = true;
+      removeDraft(draftId);
+      setNewlySavedInstanceName(payload.instanceName);
+    },
+    [removeDraft],
+  );
+
+  const draftInstance: IProviderInstance = useMemo(
+    () => ({ instance_name: '' }) as IProviderInstance,
+    [],
+  );
+
+  return (
+    <div className="flex w-full h-full border-[0.5px] border-border-button rounded-lg relative overflow-hidden">
+      <Spotlight />
+      <section className="flex flex-col gap-4 w-[320px] shrink-0 px-5 border-r-[0.5px] border-border-button overflow-auto scrollbar-auto">
+        <Sidebar selection={selection} onSelect={setSelection} />
+      </section>
+      <section className="flex-1 flex flex-col overflow-hidden">
+        {selection === 'default' ? (
+          <div className="flex-1 overflow-auto scrollbar-auto">
+            <SystemSetting />
+          </div>
+        ) : (
+          <>
+            {/* Sticky top: provider name + doc-link arrow. Saving lives
+                in each instance card's header. */}
+            <ProviderHeaderBar providerName={selection as string} />
+
+            {/* Scrollable middle: instance cards + optional draft cards */}
+            <div className="flex-1 overflow-auto scrollbar-auto p-4 flex flex-col gap-4">
+              {instances.length === 0 && draftIds.length === 0 && (
+                <div className="text-text-secondary text-sm py-6 text-center">
+                  {tSetting('noInstancesConfigured')}
+                </div>
+              )}
+              {instances.map((instance, index) => (
+                <ProviderInstanceCardWithPrivilege
+                  key={instance.instance_name}
+                  providerName={selection as string}
+                  instance={instance}
+                  defaultOpen={
+                    index === 0 ||
+                    instance.instance_name === newlySavedInstanceName
+                  }
+                />
+              ))}
+              {draftIds.map((id) => (
+                <ProviderInstanceCard
+                  key={id}
+                  providerName={selection as string}
+                  instance={draftInstance}
+                  isDraft
+                  onDelete={() => handleDraftCancel(id)}
+                  onSaved={handleDraftSaved(id)}
+                />
+              ))}
+              <div className="z-10 border-border-button py-4">
+                <button
+                  type="button"
+                  className="w-full flex items-center justify-center gap-2 px-3 py-1 rounded-md border border-dashed border-border-button text-text-secondary hover:bg-bg-input hover:text-text-primary transition-colors"
+                  onClick={addDraft}
+                  data-testid="add-instance-bottom"
+                >
+                  <Plus className="size-4" />
+                  <span className="text-sm">{tSetting('addInstanceText')}</span>
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+    </div>
+  );
+};
+
+export default SettingModelV2;

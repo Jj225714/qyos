@@ -1,0 +1,113 @@
+suite: test deployment
+templates:
+  - deployment.yaml
+chart:
+  version: 1.0.0
+  appVersion: 1.2.3
+tests:
+  - it: manifest should match snapshot
+    asserts:
+      - matchSnapshot: {}
+  - it: has extraVolume and extraVolumeMounts
+    set:
+      extraVolumes:
+        - name: extra-volume
+          emptyDir: {}
+      extraVolumeMounts:
+        - name: extra-volume
+          mountPath: /extra-volume
+    asserts:
+      - matchSnapshot: {}
+  - it: mounts the init data and passes its settings when initData is enabled
+    set:
+      initData.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: initDataFile
+            value: /init-data/init_data.json
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: initDataMerge
+            value: "true"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: initDataWatchInterval
+            value: "30"
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: init-data
+            secret:
+              secretName: RELEASE-NAME-casdoor-init-data
+              items:
+                - key: init_data.json
+                  path: init_data.json
+  - it: reads the init data from an existing secret
+    set:
+      initData.enabled: true
+      initData.existingSecret: casdoor-init-data
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: init-data
+            secret:
+              secretName: casdoor-init-data
+              items:
+                - key: init_data.yaml
+                  path: init_data.yaml
+  - it: passes the initial admin password from a value
+    set:
+      initAdminPassword.value: admin-password
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: initAdminPassword
+            value: admin-password
+  - it: reads the initial admin password from an existing secret
+    set:
+      initAdminPassword.existingSecret: casdoor-admin
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: initAdminPassword
+            valueFrom:
+              secretKeyRef:
+                name: casdoor-admin
+                key: initAdminPassword
+  - it: prefers the existing secret over the value
+    set:
+      initAdminPassword.value: admin-password
+      initAdminPassword.existingSecret: casdoor-admin
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: initAdminPassword
+            valueFrom:
+              secretKeyRef:
+                name: casdoor-admin
+                key: initAdminPassword
+  - it: lets the probes be tuned or turned off
+    set:
+      probe.liveness.enabled: false
+      probe.startup.failureThreshold: 60
+      probe.readiness.timeoutSeconds: 2
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].livenessProbe
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.failureThreshold
+          value: 60
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.timeoutSeconds
+          value: 2
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /api/health

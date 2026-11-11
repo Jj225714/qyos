@@ -1,0 +1,158 @@
+import { Collapse } from '@/components/collapse';
+import { LayoutRecognizeFormField } from '@/components/layout-recognize-form-field';
+import { RAGFlowFormItem } from '@/components/ragflow-form';
+import { SwitchFormField } from '@/components/switch-form-field';
+import { Button } from '@/components/ui/button';
+import { Form, FormField } from '@/components/ui/form';
+import { FormTooltip } from '@/components/ui/tooltip';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { Plus } from 'lucide-react';
+import { memo, useCallback, useMemo } from 'react';
+import { useForm, useWatch } from 'react-hook-form';
+import { useTranslation } from 'react-i18next';
+import { z } from 'zod';
+import { BeginQueryType } from '../../constant';
+import { useOwnerTenantId } from '../../context';
+import { BeginQuery, INextOperatorForm } from '../../interface';
+import { ParameterDialog } from '../begin-form/parameter-dialog';
+import { QueryTable } from '../begin-form/query-table';
+import { useEditQueryRecord } from '../begin-form/use-edit-query';
+import { Output } from '../components/output';
+import { PromptEditor } from '../components/prompt-editor';
+import { useValues } from './use-values';
+import { useWatchFormChange } from './use-watch-change';
+
+const FormSchema = z.object({
+  enable_tips: z.boolean().optional(),
+  tips: z.string().trim().optional(),
+  layout_recognize: z.string().optional(),
+  inputs: z
+    .array(
+      z.object({
+        key: z.string(),
+        type: z.string(),
+        value: z.string(),
+        optional: z.boolean(),
+        name: z.string(),
+        options: z.array(z.union([z.number(), z.string(), z.boolean()])),
+      }),
+    )
+    .optional(),
+});
+
+function UserFillUpForm({ node }: INextOperatorForm) {
+  const { t } = useTranslation();
+  const ownerTenantId = useOwnerTenantId();
+
+  const values = useValues(node);
+
+  const form = useForm({
+    defaultValues: values,
+    resolver: zodResolver(FormSchema),
+  });
+
+  useWatchFormChange(node?.id, form);
+
+  const inputs: BeginQuery[] = useWatch({
+    control: form.control,
+    name: 'inputs',
+  });
+
+  const hasFileInput = useMemo(
+    () => inputs?.some((x) => x.type === BeginQueryType.File),
+    [inputs],
+  );
+
+  const outputList = useMemo(
+    () =>
+      inputs?.map((item) => ({
+        title: item.name,
+        type: item.type,
+      })),
+    [inputs],
+  );
+
+  const {
+    ok,
+    currentRecord,
+    visible,
+    hideModal,
+    showModal,
+    otherThanCurrentQuery,
+    handleDeleteRecord,
+  } = useEditQueryRecord({
+    form,
+    node,
+  });
+
+  const handleAddQuery = useCallback(() => {
+    showModal();
+  }, [showModal]);
+
+  return (
+    <section className="px-5 space-y-5">
+      <Form {...form}>
+        <SwitchFormField
+          name="enable_tips"
+          label={t('flow.guidingQuestion')}
+          tooltip={t('flow.openingSwitchTip')}
+        />
+
+        <RAGFlowFormItem
+          name="tips"
+          label={t('flow.msg')}
+          tooltip={t('chat.setAnOpenerTip')}
+        >
+          <PromptEditor></PromptEditor>
+        </RAGFlowFormItem>
+
+        {/* Create a hidden field to make Form instance record this */}
+        <FormField
+          control={form.control}
+          name={'inputs'}
+          render={() => <div></div>}
+        />
+        <Collapse
+          title={
+            <div>
+              {t('flow.input')}
+              <FormTooltip tooltip={t('flow.beginInputTip')}></FormTooltip>
+            </div>
+          }
+          rightContent={
+            <Button variant={'ghost'} onClick={handleAddQuery}>
+              <Plus />
+            </Button>
+          }
+        >
+          <QueryTable
+            data={inputs}
+            showModal={showModal}
+            deleteRecord={handleDeleteRecord}
+          ></QueryTable>
+        </Collapse>
+
+        {visible && (
+          <ParameterDialog
+            hideModal={hideModal}
+            initialValue={currentRecord}
+            otherThanCurrentQuery={otherThanCurrentQuery}
+            submit={ok}
+          ></ParameterDialog>
+        )}
+        {hasFileInput && (
+          <LayoutRecognizeFormField
+            name="layout_recognize"
+            horizontal={false}
+            showMineruOptions={false}
+            showPaddleocrOptions={false}
+            ownerTenantId={ownerTenantId}
+          ></LayoutRecognizeFormField>
+        )}
+      </Form>
+      <Output list={outputList}></Output>
+    </section>
+  );
+}
+
+export default memo(UserFillUpForm);

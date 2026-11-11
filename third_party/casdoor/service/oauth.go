@@ -1,0 +1,129 @@
+// Copyright 2023 The casbin Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package service
+
+import (
+	"fmt"
+	"net/http"
+	"net/url"
+	"slices"
+	"strings"
+
+	"github.com/casdoor/casdoor-go-sdk/casdoorsdk"
+	"github.com/casdoor/casdoor/conf"
+	"github.com/casdoor/casdoor/object"
+	"github.com/casdoor/casdoor/util"
+)
+
+func getSigninUrl(casdoorClient *casdoorsdk.Client, callbackUrl string, originalPath string) string {
+	scope := "read"
+	return fmt.Sprintf("%s/login/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=%s&state=%s",
+		casdoorClient.Endpoint, casdoorClient.ClientId, url.QueryEscape(callbackUrl), scope, url.QueryEscape(originalPath))
+}
+
+func getSiteSigninUrl(casdoorClient *casdoorsdk.Client, scheme string, host string, originalPath string) string {
+	callbackUrl := fmt.Sprintf("%s://%s/caswaf-handler", scheme, host)
+	return getSigninUrl(casdoorClient, callbackUrl, originalPath)
+}
+
+func redirectToCasdoor(casdoorClient *casdoorsdk.Client, w http.ResponseWriter, r *http.Request) {
+	signinUrl := getSiteSigninUrl(casdoorClient, getScheme(r), r.Host, r.RequestURI)
+	http.Redirect(w, r, signinUrl, http.StatusFound)
+}
+
+func checkSiteAccessToken(casdoorClient *casdoorsdk.Client, accessToken string) error {
+	claims, err := casdoorClient.ParseJwtToken(accessToken)
+	if err != nil {
+		return err
+	}
+
+	if claims.IsRefreshToken() || claims.TokenType == "refresh-token" {
+		return fmt.Errorf("a refresh token cannot be used as the access token")
+	}
+	if !slices.Contains(claims.Audience, casdoorClient.ClientId) {
+		return fmt.Errorf("the access token is not issued to the application: %s", casdoorClient.ApplicationName)
+	}
+	return nil
+}
+
+func getSafeRedirectPath(state string) string {
+	if !strings.HasPrefix(state, "/") || strings.HasPrefix(state, "//") || strings.HasPrefix(state, "/\\") {
+		return "/"
+	}
+	return state
+}
+
+func handleAuthCallback(w http.ResponseWriter, r *http.Request) {
+	site := getSiteByDomainWithWww(r.Host)
+	if site == nil {
+		responseError(w, "Casdoor site error: site not found for host: %s", r.Host)
+		return
+	}
+
+	handleSiteCallback(w, r, site, getScheme(r), r.Host, r.URL.Query())
+}
+
+func handleSiteCallback(w http.ResponseWriter, r *http.Request, site *object.Site, scheme string, host string, query url.Values) {
+	code := query.Get("code")
+	state := query.Get("state")
+	if code == "" {
+		responseError(w, "Casdoor site error: the code should not be empty")
+		return
+	} else if state == "" {
+		responseError(w, "Casdoor site error: the state should not be empty")
+		return
+	}
+
+	// a site's owner is the organization that owns it, while applications are stored under the "admin" owner
+	application, err := object.GetApplicationByOrganizationAndName(site.Owner, site.CasdoorApplication)
+	if err != nil {
+		responseError(w, "Casdoor site error: casdoorClient.GetOAuthToken() error: %s", err.Error())
+		return
+	}
+	if application == nil {
+		application, err = object.GetApplication(util.GetId("admin", site.CasdoorApplication))
+		if err != nil {
+			responseError(w, "Casdoor site error: casdoorClient.GetOAuthToken() error: %s", err.Error())
+			return
+		}
+	}
+	if application == nil {
+		responseError(w, "Casdoor site error: the application: %s does not exist", site.CasdoorApplication)
+		return
+	}
+
+	token, tokenError, err := object.GetAuthorizationCodeToken(application, application.ClientSecret, code, "", "", conf.GetAcceptLanguage(r.Header.Get("Accept-Language")))
+	if tokenError != nil {
+		responseError(w, "Casdoor site error: casdoorClient.GetOAuthToken() error: %s", tokenError.Error)
+		return
+	}
+	if err != nil {
+		responseError(w, "Casdoor site error: casdoorClient.GetOAuthToken() error: %s", err.Error())
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "casdoor_access_token",
+		Value:    token.AccessToken,
+		Path:     "/",
+		MaxAge:   token.ExpiresIn,
+		HttpOnly: true,
+		Secure:   scheme == "https",
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	// absolute, since Traefik resolves a relative Location of forward auth against the Casdoor address
+	http.Redirect(w, r, fmt.Sprintf("%s://%s%s", scheme, host, getSafeRedirectPath(state)), http.StatusFound)
+}

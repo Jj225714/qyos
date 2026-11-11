@@ -1,0 +1,247 @@
+import { Modal } from '@/components/ui/modal/modal';
+import { FileType } from '@/constants/file';
+import { useExtraBulkActions } from '@/ee/pages/dataset/dataset/use-extra-bulk-actions';
+import {
+  UseRowSelectionType,
+  useSelectedIds,
+} from '@/hooks/logic-hooks/use-row-selection';
+import {
+  useRemoveDocument,
+  useRunDocument,
+  useSetDocumentStatus,
+} from '@/hooks/use-document-request';
+import { IDocumentInfo } from '@/interfaces/database/document';
+import { omit } from 'lodash';
+import {
+  LucideCircleX,
+  LucideCylinder,
+  LucidePlayCircle,
+  LucideToggleLeft,
+  LucideToggleRight,
+  LucideTrash2,
+} from 'lucide-react';
+import { useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useParams } from 'react-router';
+import { toast } from 'sonner';
+import { ShowPrivilegeModalReturnType } from '@/ee/pages/dataset/dataset/use-show-privilege-dialog';
+import { DocumentType, ParserGapReason } from './constant';
+import { buildParserGapModalContent } from './parser-gap-content';
+import { useParserGapValidation } from './use-parser-gap-validation';
+import { isDocumentProcessing } from './utils';
+
+export function useBulkOperateDataset({
+  rowSelection,
+  setRowSelection,
+  documents,
+  handShowPrivilegeModal,
+}: Pick<UseRowSelectionType, 'rowSelection' | 'setRowSelection'> & {
+  documents: IDocumentInfo[];
+} & Pick<ShowPrivilegeModalReturnType, 'handShowPrivilegeModal'>) {
+  const { t } = useTranslation();
+  const { selectedIds: selectedRowKeys } = useSelectedIds(
+    rowSelection,
+    documents,
+  );
+  const { id } = useParams();
+
+  const { runDocumentByIds } = useRunDocument();
+  const { setDocumentStatus } = useSetDocumentStatus();
+  const { removeDocument } = useRemoveDocument();
+  const { findDocumentParseGaps } = useParserGapValidation();
+  const extraBulkActions = useExtraBulkActions(
+    handShowPrivilegeModal,
+    selectedRowKeys,
+  );
+
+  const runDocument = useCallback(
+    async (run: number) => {
+      const nonVirtualKeys = selectedRowKeys.filter(
+        (x) =>
+          !documents.some((y) => x === y.id && y.type === DocumentType.Virtual),
+      );
+
+      if (nonVirtualKeys.length === 0) {
+        toast.error(t('Please select a non-empty file list'));
+        return;
+      }
+
+      // Starting a parse requires each file type to be supported by the
+      // Parser operator its document actually runs with; cancelling is
+      // always allowed.
+      if (run === 1) {
+        const selectedDocuments = documents.filter((x) =>
+          nonVirtualKeys.includes(x.id),
+        );
+        const gaps = findDocumentParseGaps(selectedDocuments);
+        if (gaps.length > 0) {
+          const failingNames = new Set(gaps.map((gap) => gap.name));
+          const validIds = selectedDocuments
+            .filter((x) => !failingNames.has(x.name))
+            .map((x) => x.id);
+
+          if (validIds.length === 0) {
+            // Pure-video selections have no parser that can process them, so
+            // offering anything that implies a fix would mislead. Acknowledge
+            // instead, mirroring the single-document run path. The reason
+            // check keeps this narrow: a future gap kind on a parseable file
+            // must keep the actionable dialog.
+            const videoOnly =
+              gaps.length > 0 &&
+              gaps.every(
+                (gap) =>
+                  gap.fileType === FileType.Video &&
+                  gap.reason === ParserGapReason.UnsupportedType,
+              );
+            Modal.error({
+              title: t('knowledgeDetails.parseBlockedTitle'),
+              content: buildParserGapModalContent(t, gaps, {
+                missingModel: 'knowledgeDetails.addModelToParseHint',
+                unsupportedType: 'knowledgeDetails.reselectParserToParseHint',
+              }),
+              showCancel: !videoOnly,
+              okText: t(videoOnly ? 'common.ok' : 'common.cancel'),
+              closable: false,
+            });
+            return;
+          }
+
+          Modal.warning({
+            title: t('knowledgeDetails.parseBlockedPartialTitle'),
+            content: (
+              <div className="space-y-2">
+                {buildParserGapModalContent(t, gaps, {
+                  missingModel: 'knowledgeDetails.addModelToParseHint',
+                  unsupportedType: 'knowledgeDetails.reselectParserToParseHint',
+                })}
+                <p>
+                  {t('knowledgeDetails.parseValidFilesNote', {
+                    count: validIds.length,
+                  })}
+                </p>
+              </div>
+            ),
+            okText: t('knowledgeDetails.parseValidFiles'),
+            cancelText: t('common.cancel'),
+            closable: false,
+            onOk: async () => {
+              await runDocumentByIds({ documentIds: validIds, run });
+            },
+          });
+          return;
+        }
+      }
+
+      await runDocumentByIds({
+        documentIds: nonVirtualKeys,
+        run,
+      });
+    },
+    [documents, runDocumentByIds, selectedRowKeys, t, findDocumentParseGaps],
+  );
+
+  // Wired straight to the run button's onClick: keep it parameterless so the
+  // click event is never mistaken for run options (it is not serializable).
+  const handleRunClick = useCallback(() => {
+    runDocument(1);
+  }, [runDocument]);
+
+  const handleCancelClick = useCallback(() => {
+    runDocument(2);
+  }, [runDocument]);
+
+  const onChangeStatus = useCallback(
+    (enabled: boolean) => {
+      setDocumentStatus({
+        status: enabled,
+        documentId: selectedRowKeys,
+        datasetId: id!,
+      });
+    },
+    [selectedRowKeys, setDocumentStatus, id],
+  );
+
+  const handleEnableClick = useCallback(() => {
+    onChangeStatus(true);
+  }, [onChangeStatus]);
+
+  const handleDisableClick = useCallback(() => {
+    onChangeStatus(false);
+  }, [onChangeStatus]);
+
+  const handleDelete = useCallback(async () => {
+    const currentKeys = selectedRowKeys.filter((id) =>
+      documents.some((doc) => doc.id === id),
+    );
+    setRowSelection((prev) =>
+      omit(
+        prev,
+        selectedRowKeys.filter((id) => !currentKeys.includes(id)),
+      ),
+    );
+    if (currentKeys.length === 0) return;
+
+    const deletedKeys = currentKeys.filter(
+      (x) => !documents.filter(isDocumentProcessing).some((y) => y.id === x),
+    );
+    if (deletedKeys.length === 0) {
+      toast.error(
+        t('knowledgeConfiguration.theDocumentBeingParsedCannotBeDeleted'),
+      );
+      return;
+    }
+
+    if (deletedKeys.length < currentKeys.length) {
+      toast.warning(
+        t('knowledgeConfiguration.theDocumentBeingParsedCannotBeDeleted'),
+      );
+    }
+
+    const code = await removeDocument(deletedKeys);
+    if (code === 0) {
+      setRowSelection((prev) => omit(prev, deletedKeys));
+    }
+  }, [selectedRowKeys, removeDocument, documents, t, setRowSelection]);
+
+  const list = [
+    {
+      id: 'run',
+      label: t('knowledgeDetails.run'),
+      icon: <LucidePlayCircle />,
+      onClick: handleRunClick,
+    },
+    {
+      id: 'cancel',
+      label: t('knowledgeDetails.cancel'),
+      icon: <LucideCircleX />,
+      onClick: handleCancelClick,
+    },
+    ...extraBulkActions,
+    {
+      id: 'enabled',
+      label: t('knowledgeDetails.enabled'),
+      icon: <LucideToggleRight />,
+      onClick: handleEnableClick,
+    },
+    {
+      id: 'disabled',
+      label: t('knowledgeDetails.disabled'),
+      icon: <LucideToggleLeft />,
+      onClick: handleDisableClick,
+    },
+
+    {
+      id: 'batch-metadata',
+      label: t('knowledgeDetails.metadata.metadata'),
+      icon: <LucideCylinder />,
+    },
+    {
+      id: 'delete',
+      label: t('common.delete'),
+      icon: <LucideTrash2 />,
+      onClick: handleDelete,
+    },
+  ];
+
+  return { list };
+}

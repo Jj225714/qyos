@@ -1,0 +1,207 @@
+// Copyright 2021 The Casdoor Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package controllers
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/casdoor/casdoor/object"
+)
+
+// GetOidcDiscovery
+// @Title GetOidcDiscovery
+// @Tag OIDC API
+// @Description Get Oidc Discovery
+// @Success 200 {object} object.OidcDiscovery
+// @router /.well-known/openid-configuration [get]
+func (c *RootController) GetOidcDiscovery() {
+	host := c.Ctx.Request.Host
+	c.Data["json"] = object.GetOidcDiscovery(host, "")
+	c.ServeJSON()
+}
+
+// GetOidcDiscoveryByApplication
+// @Title GetOidcDiscoveryByApplication
+// @Tag OIDC API
+// @Description Get Oidc Discovery for specific application
+// @Param application path string true "application name"
+// @Success 200 {object} object.OidcDiscovery
+// @router /.well-known/:application/openid-configuration [get]
+func (c *RootController) GetOidcDiscoveryByApplication() {
+	application := c.Ctx.Input.Param(":application")
+	host := c.Ctx.Request.Host
+	c.Data["json"] = object.GetOidcDiscovery(host, application)
+	c.ServeJSON()
+}
+
+// GetOidcDiscoveryByOrganization
+// @Title GetOidcDiscoveryByOrganization
+// @Tag OIDC API
+// @Description Get Oidc Discovery and OAuth 2.0 Authorization Server Metadata of an organization that has its own issuer
+// @Param organization path string true "organization name"
+// @Success 200 {object} object.OidcDiscovery
+// @router /orgs/:organization/.well-known/openid-configuration [get]
+func (c *RootController) GetOidcDiscoveryByOrganization() {
+	organization := c.Ctx.Input.Param(":organization")
+	oidcDiscovery, err := object.GetOidcDiscoveryByOrganization(c.Ctx.Request.Host, organization)
+	if err != nil {
+		c.responseWellKnownError(http.StatusInternalServerError, err)
+		return
+	}
+	if oidcDiscovery == nil {
+		c.responseWellKnownError(http.StatusNotFound, fmt.Errorf("the organization: %s doesn't exist or doesn't have its own issuer", organization))
+		return
+	}
+
+	c.Data["json"] = oidcDiscovery
+	c.ServeJSON()
+}
+
+// GetJwks
+// @Title GetJwks
+// @Tag OIDC API
+// @Success 200 {object} jose.JSONWebKey
+// @router /.well-known/jwks [get]
+func (c *RootController) GetJwks() {
+	jwks, err := object.GetJsonWebKeySetWithSm2("")
+	if err != nil {
+		c.responseWellKnownError(http.StatusInternalServerError, err)
+		return
+	}
+	c.Data["json"] = jwks
+	c.ServeJSON()
+}
+
+// GetJwksByApplication
+// @Title GetJwksByApplication
+// @Tag OIDC API
+// @Param application path string true "application name"
+// @Success 200 {object} jose.JSONWebKey
+// @router /.well-known/:application/jwks [get]
+func (c *RootController) GetJwksByApplication() {
+	application := c.Ctx.Input.Param(":application")
+	jwks, err := object.GetJsonWebKeySetWithSm2(application)
+	if err != nil {
+		c.responseWellKnownError(http.StatusInternalServerError, err)
+		return
+	}
+	c.Data["json"] = jwks
+	c.ServeJSON()
+}
+
+// GetWebFinger
+// @Title GetWebFinger
+// @Tag OIDC API
+// @Param resource query string true "resource"
+// @Success 200 {object} object.WebFinger
+// @router /.well-known/webfinger [get]
+func (c *RootController) GetWebFinger() {
+	resource := c.Ctx.Input.Query("resource")
+	rels := []string{}
+	host := c.Ctx.Request.Host
+
+	inputs, _ := c.Input()
+	for key, value := range inputs {
+		if strings.HasPrefix(key, "rel") {
+			rels = append(rels, value...)
+		}
+	}
+
+	webfinger, err := object.GetWebFinger(resource, rels, host, "")
+	if err != nil {
+		c.responseWebFingerError(err)
+		return
+	}
+
+	c.Data["json"] = webfinger
+	c.Ctx.Output.ContentType("application/jrd+json")
+	c.ServeJSON()
+}
+
+// GetWebFingerByApplication
+// @Title GetWebFingerByApplication
+// @Tag OIDC API
+// @Param application path string true "application name"
+// @Param resource query string true "resource"
+// @Success 200 {object} object.WebFinger
+// @router /.well-known/:application/webfinger [get]
+func (c *RootController) GetWebFingerByApplication() {
+	application := c.Ctx.Input.Param(":application")
+	resource := c.Ctx.Input.Query("resource")
+	rels := []string{}
+	host := c.Ctx.Request.Host
+
+	inputs, _ := c.Input()
+	for key, value := range inputs {
+		if strings.HasPrefix(key, "rel") {
+			rels = append(rels, value...)
+		}
+	}
+
+	webfinger, err := object.GetWebFinger(resource, rels, host, application)
+	if err != nil {
+		c.responseWebFingerError(err)
+		return
+	}
+
+	c.Data["json"] = webfinger
+	c.Ctx.Output.ContentType("application/jrd+json")
+	c.ServeJSON()
+}
+
+// GetOAuthServerMetadata
+// @Title GetOAuthServerMetadata
+// @Tag OAuth API
+// @Description Get OAuth 2.0 Authorization Server Metadata (RFC 8414)
+// @Success 200 {object} object.OidcDiscovery
+// @router /.well-known/oauth-authorization-server [get]
+func (c *RootController) GetOAuthServerMetadata() {
+	host := c.Ctx.Request.Host
+	c.Data["json"] = object.GetOidcDiscovery(host, "")
+	c.ServeJSON()
+}
+
+// GetOAuthServerMetadataByApplication
+// @Title GetOAuthServerMetadataByApplication
+// @Tag OAuth API
+// @Description Get OAuth 2.0 Authorization Server Metadata for specific application (RFC 8414)
+// @Param application path string true "application name"
+// @Success 200 {object} object.OidcDiscovery
+// @router /.well-known/:application/oauth-authorization-server [get]
+func (c *RootController) GetOAuthServerMetadataByApplication() {
+	application := c.Ctx.Input.Param(":application")
+	host := c.Ctx.Request.Host
+	c.Data["json"] = object.GetOidcDiscovery(host, application)
+	c.ServeJSON()
+}
+
+// responseWellKnownError responds with an error status instead of 200, the standard clients of these endpoints only check the status
+func (c *RootController) responseWellKnownError(status int, err error) {
+	c.Ctx.Output.SetStatus(status)
+	c.ResponseError(err.Error())
+}
+
+func (c *RootController) responseWebFingerError(err error) {
+	status := http.StatusInternalServerError
+	if errors.Is(err, object.ErrWebFingerInvalidResource) {
+		status = http.StatusBadRequest
+	} else if errors.Is(err, object.ErrWebFingerUserNotFound) {
+		status = http.StatusNotFound
+	}
+	c.responseWellKnownError(status, err)
+}

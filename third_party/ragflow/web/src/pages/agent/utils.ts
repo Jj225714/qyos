@@ -1,0 +1,1231 @@
+import { FileType, FileTypeSuffixMap } from '@/constants/file';
+import {
+  DSL,
+  DSLComponents,
+  GlobalVariableType,
+  IAgentForm,
+  ICategorizeForm,
+  ICategorizeItem,
+  ICategorizeItemResult,
+  ISwitchForm,
+  RAGFlowNodeType,
+} from '@/interfaces/database/agent';
+import { buildSelectOptions } from '@/utils/component-util';
+import { parseDelimiterListForDisplay } from '@/utils/delimiter-preview';
+import { buildOptions, removeUselessFieldsFromValues } from '@/utils/form';
+import { Edge, Node, XYPosition } from '@xyflow/react';
+import { humanId } from 'human-id';
+import {
+  curry,
+  get,
+  intersectionWith,
+  isEmpty,
+  isEqual,
+  omit,
+  pick,
+  sample,
+} from 'lodash';
+import isObject from 'lodash/isObject';
+import {
+  AgentDialogueMode,
+  CategorizeAnchorPointPositions,
+  InputMode,
+  NoCopyOperatorsList,
+  NoDebugOperatorsList,
+  NodeHandleId,
+  Operator,
+  SwitchElseTo,
+  TitleChunkerMethod,
+  TypesWithArray,
+  WebhookSecurityAuthType,
+} from './constant';
+import { BeginFormSchemaType } from './form/begin-form/schema';
+import { DataOperationsFormSchemaType } from './form/data-operations-form';
+import { ExtractorFormSchemaType } from './form/extractor-form';
+import { ParserFormSchemaType } from './form/parser-form';
+import { normalizeParserFormValues } from './form/parser-form/utils';
+import { TitleChunkerFormSchemaType } from './form/title-chunker-form';
+import { TokenChunkerFormSchemaType } from './form/token-chunker-form';
+import { BeginQuery, IPosition } from './interface';
+
+function buildAgentExceptionGoto(edges: Edge[], nodeId: string) {
+  const exceptionEdges = edges.filter(
+    (x) =>
+      x.source === nodeId && x.sourceHandle === NodeHandleId.AgentException,
+  );
+
+  return exceptionEdges.map((x) => x.target);
+}
+
+const buildComponentDownstreamOrUpstream = (
+  edges: Edge[],
+  nodeId: string,
+  isBuildDownstream = true,
+  nodes: Node[],
+) => {
+  return edges
+    .filter((y) => {
+      const node = nodes.find((x) => x.id === nodeId);
+      let isNotUpstreamTool = true;
+      let isNotUpstreamAgent = true;
+      let isNotExceptionGoto = true;
+      if (isBuildDownstream && node?.data.label === Operator.Agent) {
+        isNotExceptionGoto = y.sourceHandle !== NodeHandleId.AgentException;
+        // Exclude the tool operator downstream of the agent operator
+        isNotUpstreamTool = !y.target.startsWith(Operator.Tool);
+        // Exclude the agent operator downstream of the agent operator
+        isNotUpstreamAgent = !(
+          y.target.startsWith(Operator.Agent) &&
+          y.targetHandle === NodeHandleId.AgentTop
+        );
+      }
+      return (
+        y[isBuildDownstream ? 'source' : 'target'] === nodeId &&
+        isNotUpstreamTool &&
+        isNotUpstreamAgent &&
+        isNotExceptionGoto
+      );
+    })
+    .map((y) => y[isBuildDownstream ? 'target' : 'source']);
+};
+
+const removeUselessDataInTheOperator = curry(
+  (operatorName: string, params: Record<string, unknown>) => {
+    if (operatorName === Operator.Categorize) {
+      return removeUselessFieldsFromValues(params, '');
+    }
+    return params;
+  },
+);
+// initialize data for operators without parameters
+// const initializeOperatorParams = curry((operatorName: string, values: any) => {
+//   if (isEmpty(values)) {
+//     return initialFormValuesMap[operatorName as Operator];
+//   }
+//   return values;
+// });
+
+function buildAgentTools(edges: Edge[], nodes: Node[], nodeId: string) {
+  const node = nodes.find((x) => x.id === nodeId);
+  const params = { ...(node?.data.form ?? {}) };
+  if (node && node.data.label === Operator.Agent) {
+    const bottomSubAgentEdges = edges.filter(
+      (x) => x.source === nodeId && x.sourceHandle === NodeHandleId.AgentBottom,
+    );
+
+    (params as IAgentForm).tools = (params as IAgentForm).tools.concat(
+      bottomSubAgentEdges.map((x) => {
+        const {
+          params: formData,
+          id,
+          name,
+        } = buildAgentTools(edges, nodes, x.target);
+
+        return {
+          component_name: Operator.Agent,
+          id,
+          name,
+          params: { ...formData },
+        };
+      }),
+    );
+  }
+  return { params, name: node?.data.name, id: node?.id } as {
+    params: IAgentForm;
+    name: string;
+    id: string;
+  };
+}
+
+export const generateSwitchHandleText = (idx: number) => {
+  return `Case ${idx + 1}`;
+};
+
+function filterTargetsBySourceHandleId(edges: Edge[], handleId: string) {
+  return edges.filter((x) => x.sourceHandle === handleId).map((x) => x.target);
+}
+
+function buildCategorize(edges: Edge[], nodes: Node[], nodeId: string) {
+  const node = nodes.find((x) => x.id === nodeId);
+  const params = { ...(node?.data.form ?? {}) } as ICategorizeForm;
+  if (node && node.data.label === Operator.Categorize) {
+    const subEdges = edges.filter((x) => x.source === nodeId);
+
+    const items = params.items || [];
+
+    const nextCategoryDescription = items.reduce<
+      ICategorizeForm['category_description']
+    >((pre, val) => {
+      const key = val.name;
+      pre[key] = {
+        ...omit(val, 'name', 'uuid'),
+        examples: val.examples?.map((x) => x.value) || [],
+        to: filterTargetsBySourceHandleId(subEdges, val.uuid),
+      };
+      return pre;
+    }, {});
+
+    params.category_description = nextCategoryDescription;
+  }
+  return omit(params, 'items');
+}
+
+const buildOperatorParams = (operatorName: string) =>
+  removeUselessDataInTheOperator(operatorName);
+
+const ExcludeOperators = [Operator.Note, Operator.Tool, Operator.Placeholder];
+
+export function isBottomSubAgent(edges: Edge[], nodeId?: string) {
+  const edge = edges.find(
+    (x) => x.target === nodeId && x.targetHandle === NodeHandleId.AgentTop,
+  );
+  return !!edge;
+}
+
+export function hasSubAgentOrTool(edges: Edge[], nodeId?: string) {
+  const edge = edges.find(
+    (x) =>
+      x.source === nodeId &&
+      (x.sourceHandle === NodeHandleId.Tool ||
+        x.sourceHandle === NodeHandleId.AgentBottom),
+  );
+  return !!edge;
+}
+
+export function hasSubAgent(edges: Edge[], nodeId?: string) {
+  const edge = edges.find(
+    (x) => x.source === nodeId && x.sourceHandle === NodeHandleId.AgentBottom,
+  );
+  return !!edge;
+}
+
+// Because the array of react-hook-form must be object data,
+// it needs to be converted into a simple data type array required by the backend
+function transformObjectArrayToPureArray(
+  list: Array<Record<string, any>>,
+  field: string,
+) {
+  return Array.isArray(list)
+    ? list.filter((x) => !isEmpty(x[field])).map((y) => y[field])
+    : [];
+}
+
+/**
+ * Serializes parser form values into per-file-family API parameters.
+ * Normalizes global vision settings while preserving explicit PDF MinerU
+ * controls (including false) and the independent image OCR switch/model ID.
+ *
+ * @param params - Parser form values, including setups and global vision options.
+ * @returns File-family parameters alongside normalized global vision settings.
+ */
+export function transformParserParams(params: ParserFormSchemaType) {
+  // Save global vision options from the normalized form alongside the
+  // per-family setups, including nodes whose form has not been opened.
+  const normalizedParams = normalizeParserFormValues(params);
+  const setups = normalizedParams.setups.reduce<
+    Record<string, ParserFormSchemaType['setups'][0]>
+  >((pre, cur, index) => {
+    if (cur.fileFormat) {
+      let filteredSetup: Partial<
+        Omit<ParserFormSchemaType['setups'][0], 'pages'> & {
+          suffix: string[];
+        } & {
+          two_column_check: boolean;
+          enable_multi_column: boolean;
+          pages: number[][];
+        }
+      > = {
+        suffix: FileTypeSuffixMap[cur.fileFormat as FileType],
+      };
+
+      switch (cur.fileFormat) {
+        case FileType.PDF:
+          filteredSetup = {
+            ...filteredSetup,
+            parse_method: cur.parse_method,
+            mineru_parse_method: cur.mineru_parse_method,
+            mineru_lang: cur.mineru_lang,
+            mineru_formula_enable: cur.mineru_formula_enable,
+            mineru_table_enable: cur.mineru_table_enable,
+            lang: cur.lang,
+            enable_multi_column: cur.enable_multi_column,
+            remove_toc: cur.remove_toc,
+            remove_header_footer: cur.remove_header_footer || false,
+            pages: cur.pages?.map((x) => [x.from, x.to]) ?? [],
+          };
+          // Only include TCADP parameters if TCADP Parser is selected
+          if (cur.parse_method?.toLowerCase() === 'tcadp parser') {
+            filteredSetup.table_result_type = cur.table_result_type;
+            filteredSetup.markdown_image_response_type =
+              cur.markdown_image_response_type;
+          }
+          break;
+        case FileType.Spreadsheet:
+          filteredSetup = {
+            ...filteredSetup,
+            parse_method: cur.parse_method,
+          };
+          // Only include TCADP parameters if TCADP Parser is selected
+          if (cur.parse_method?.toLowerCase() === 'tcadp parser') {
+            filteredSetup.table_result_type = cur.table_result_type;
+            filteredSetup.markdown_image_response_type =
+              cur.markdown_image_response_type;
+          }
+          break;
+        case FileType.PowerPoint:
+          filteredSetup = {
+            ...filteredSetup,
+            parse_method: cur.parse_method,
+          };
+          // Only include TCADP parameters if TCADP Parser is selected
+          if (cur.parse_method?.toLowerCase() === 'tcadp parser') {
+            filteredSetup.table_result_type = cur.table_result_type;
+            filteredSetup.markdown_image_response_type =
+              cur.markdown_image_response_type;
+          }
+          break;
+        case FileType.Image:
+          filteredSetup = {
+            ...filteredSetup,
+            ocr_enabled: cur.ocr_enabled,
+            ocr_model_id: cur.ocr_model_id,
+          };
+          break;
+        case FileType.Email:
+          filteredSetup = {
+            ...filteredSetup,
+            fields: cur.fields,
+          };
+          break;
+        case FileType.Doc:
+          filteredSetup = {
+            ...filteredSetup,
+            remove_header_footer: cur.remove_header_footer || false,
+          };
+          break;
+        case FileType.Docx:
+          filteredSetup = {
+            ...filteredSetup,
+            remove_header_footer: cur.remove_header_footer || false,
+          };
+          break;
+        case FileType.Html:
+          filteredSetup = {
+            ...filteredSetup,
+            remove_header_footer: cur.remove_header_footer || false,
+          };
+          break;
+        case FileType.Audio:
+          // Audio keeps its own per-setup model: it is an ASR model, not the
+          // shared vision one.
+          filteredSetup = {
+            ...filteredSetup,
+            vlm: { llm_id: cur.vlm?.llm_id },
+          };
+          break;
+        default:
+          break;
+      }
+
+      pre[cur.fileFormat] = {
+        ...filteredSetup,
+        order_index: index,
+      } as any;
+    }
+    return pre;
+  }, {});
+
+  // Flatten the setups map into the top-level params.
+  return { ...omit(normalizedParams, ['setups']), ...setups };
+}
+
+// Decides whether an empty delimiter list should be re-seeded with the
+// default '\n' row. Only legacy nodes need it: nodes saved under the removed
+// 'token_size' tab always persisted an empty list (older DSLs may not even
+// carry a mode). Nodes written by the current form have an explicit
+// 'delimiter'/'one' mode, so an empty list there is a deliberate choice —
+// pure token-size chunking, which both backends support — and must survive.
+export function shouldSeedDefaultDelimiter(
+  delimiterMode: string | undefined,
+  delimiters: unknown,
+): boolean {
+  return (
+    isEmpty(delimiters) &&
+    delimiterMode !== 'delimiter' &&
+    delimiterMode !== 'one'
+  );
+}
+
+// Migrates legacy token chunker values to the current form shape. Idempotent,
+// so every boundary (form defaults, canvas save, dataset load) can apply it:
+// - 'token_size' (removed tab) or an absent mode falls back to 'delimiter';
+// - only legacy nodes get the empty delimiter list re-seeded (the general
+//   chunker never had the legacy tab, so callers pass seedLegacyDelimiter:
+//   false — an empty list there is always a deliberate choice);
+// - enable_children predates the toggle: derive it from the children list.
+export function normalizeTokenChunkerFormValues<T extends Record<string, any>>(
+  values: T,
+  { seedLegacyDelimiter = true } = {},
+) {
+  return {
+    ...values,
+    delimiter_mode: values.delimiter_mode === 'one' ? 'one' : 'delimiter',
+    delimiters:
+      seedLegacyDelimiter &&
+      shouldSeedDefaultDelimiter(values.delimiter_mode, values.delimiters)
+        ? [{ value: '\n' }]
+        : (values.delimiters ?? []),
+    enable_children:
+      values.enable_children ??
+      (Array.isArray(values.children_delimiters) &&
+        values.children_delimiters.length > 0),
+    children_delimiters: values.children_delimiters ?? [],
+  };
+}
+
+export function transformTokenChunkerParams(
+  params: TokenChunkerFormSchemaType,
+  { seedLegacyDelimiter = true } = {},
+) {
+  const { image_table_context_window, ...rest } =
+    normalizeTokenChunkerFormValues(params, { seedLegacyDelimiter });
+  const imageTableContextWindow = Number(image_table_context_window || 0);
+  return {
+    ...rest,
+    // Keep the configured values in 'one' mode too: the chunker ignores them
+    // while merging everything into a single chunk, but zeroing them here
+    // wiped the user's settings on every save (they reloaded as 0 / ["\n"]).
+    overlapped_percent: Number(rest.overlapped_percent) / 100,
+    delimiters: rest.delimiters.map(
+      ({ value }: { value?: string }) => value ?? '',
+    ),
+    table_context_size: imageTableContextWindow,
+    image_context_size: imageTableContextWindow,
+
+    // Unset children delimiters if this option is not enabled
+    children_delimiters: rest.enable_children
+      ? rest.children_delimiters.map(
+          ({ value }: { value?: string }) => value ?? '',
+        )
+      : [],
+  };
+}
+
+// The Go chunker treats a bare entry as a soft split point (the split pieces
+// are still merged up to the chunk token size). The shared chunker form shows
+// the matching tip.
+export function getChunkerDelimiterTipKey() {
+  return 'flow.delimitersTip';
+}
+
+export function getChunkerDelimiterPreview(values: (string | undefined)[]) {
+  return parseDelimiterListForDisplay(values, { keepBare: true });
+}
+
+// The child split activates every non-empty entry on both backends, so the
+// child preview never drops bare rows.
+export function getChunkerChildrenDelimiterPreview(
+  values: (string | undefined)[],
+) {
+  return parseDelimiterListForDisplay(values, { keepBare: true });
+}
+
+export function transformGeneralChunkerParams(
+  params: TokenChunkerFormSchemaType,
+) {
+  // The general chunker never had the legacy 'token_size' tab, so an empty
+  // delimiter list is always a deliberate choice — skip the legacy re-seed.
+  const result = omit(
+    transformTokenChunkerParams(params, { seedLegacyDelimiter: false }),
+    ['delimiter_mode'],
+  );
+  result.table_context_size = Number(params.table_context_size || 0);
+  result.image_context_size = Number(params.image_context_size || 0);
+  return result;
+}
+
+// Resolve active heading settings and preserve independent media-context budgets.
+export function transformTitleChunkerParams(
+  params: TitleChunkerFormSchemaType,
+) {
+  const activeRules =
+    (params.method === TitleChunkerMethod.Group
+      ? params.groupRules
+      : params.hierarchyRules) ?? params.rules;
+
+  const levels = (activeRules || []).map((rule) =>
+    transformObjectArrayToPureArray(rule.levels, 'expression'),
+  );
+
+  const hierarchyValue =
+    (params.method === TitleChunkerMethod.Group
+      ? params.hierarchyGroup
+      : params.hierarchyHierarchy) ?? params.hierarchy;
+
+  // The token cap is split per method like rules/hierarchy above; the runtime
+  // components read the shared chunk_token_cap, so resolve the active
+  // method's value into it. Snapshots stored before the split carry only the
+  // shared key — fall back to it. When no cap key exists at all (the manual
+  // chunker strips them), write none.
+  const chunkTokenCap =
+    (params.method === TitleChunkerMethod.Group
+      ? params.groupChunkTokenCap
+      : params.hierarchyChunkTokenCap) ?? params.chunk_token_cap;
+
+  // Persist each method's rules, hierarchy value and token cap under its own
+  // key so the stored config keeps them independent (the shared
+  // `levels`/`hierarchy`/`chunk_token_cap` keys carry only the active
+  // method's values for the backend components). The load side
+  // (`transformTitleChunkerConfigToForm` and `transformApiResponseToForm`)
+  // reads these split keys first and only falls back to migrating the shared
+  // keys when they are absent.
+  return {
+    ...omit(params, [
+      // Legacy pre-split rules field. The active rules have already been
+      // resolved (with `rules` as fallback) into `levels` above.
+      'rules',
+    ]),
+    method: params.method,
+    hierarchy: Number(hierarchyValue || 0),
+    include_heading_content: Boolean(params.include_heading_content),
+    root_chunk_as_heading: Boolean(params.root_chunk_as_heading),
+    table_context_size: Number(params.table_context_size ?? 0),
+    image_context_size: Number(params.image_context_size ?? 0),
+    ...(chunkTokenCap === undefined || chunkTokenCap === null
+      ? {}
+      : { chunk_token_cap: Number(chunkTokenCap) }),
+    levels,
+  };
+}
+
+// LLM setting keys LLM-backed pipeline operators (Extractor, Compiler) keep in
+// their DSL params. Mirrors LlmSettingSchema (components/llm-setting-items/next)
+// — duplicated here as a plain list so this module doesn't import the form
+// components.
+export const LlmSettingParamKeys = [
+  'llm_id',
+  'temperature',
+  'top_p',
+  'presence_penalty',
+  'frequency_penalty',
+  'max_tokens',
+  'parameter',
+  'thinking',
+  'temperatureEnabled',
+  'topPEnabled',
+  'presencePenaltyEnabled',
+  'frequencyPenaltyEnabled',
+  'maxTokensEnabled',
+];
+
+// An unopened legacy node can still flow through here with flat keys
+// (auto_keywords, keywords_sys_prompt, enable_metadata + metadata[],
+// the transitional "metadata_config", ...). Accept them as read
+// fallbacks — flat "metadata" is an array, which distinguishes it from
+// the group object — but never re-emit them.
+export function transformExtractorParams(
+  params: ExtractorFormSchemaType,
+): Record<string, any> {
+  const raw = params as Record<string, any>;
+  const metadataGroup =
+    raw.metadata !== undefined && !Array.isArray(raw.metadata)
+      ? raw.metadata
+      : raw.metadata_config;
+
+  const isMetadataEnabled =
+    metadataGroup?.enabled !== undefined
+      ? Boolean(metadataGroup.enabled)
+      : raw.enable_metadata === 1 || raw.enable_metadata === true;
+
+  const isSummaryEnabled =
+    params.summary?.enabled !== undefined
+      ? Boolean(params.summary?.enabled)
+      : raw.enable_summary === 1 ||
+        raw.enable_summary === true ||
+        raw.field_name === 'summary';
+
+  const metadataList =
+    metadataGroup?.metadata ??
+    (Array.isArray(raw.metadata) ? raw.metadata : []);
+  const builtInMetadataList =
+    metadataGroup?.built_in_metadata ?? raw.built_in_metadata ?? [];
+
+  const summarySysPrompt =
+    params.summary?.system_prompt ?? raw.sys_prompt ?? '';
+
+  const keywordsTopN = params.keywords?.top_n ?? raw.auto_keywords ?? 0;
+  const keywordsSysPrompt =
+    params.keywords?.system_prompt ?? raw.keywords_sys_prompt ?? '';
+
+  const questionsTopN = params.questions?.top_n ?? raw.auto_questions ?? 0;
+  const questionsSysPrompt =
+    params.questions?.system_prompt ?? raw.questions_sys_prompt ?? '';
+
+  const tagsTopN = params.tags?.top_n ?? raw.auto_tags ?? 0;
+  const tagFileId = params.tags?.tag_file_id ?? raw.tag_file_id ?? '';
+
+  // The enabled switch is authoritative when the form carries it; an unopened
+  // legacy node (flat keys only) derives it from top_n > 0, matching the Go
+  // extractor's resolveExtractToggle.
+  const isKeywordsEnabled =
+    params.keywords?.enabled !== undefined
+      ? Boolean(params.keywords.enabled)
+      : keywordsTopN > 0;
+  const isQuestionsEnabled =
+    params.questions?.enabled !== undefined
+      ? Boolean(params.questions.enabled)
+      : questionsTopN > 0;
+  const isTagsEnabled =
+    params.tags?.enabled !== undefined
+      ? Boolean(params.tags.enabled)
+      : tagsTopN > 0;
+
+  // The Go extractor (schema.ExtractorParam) reads only llm_id plus the
+  // nested per-feature groups, so emit exactly that whitelist along with
+  // the LLM settings the form defines — no legacy flat mirrors, no
+  // display-only fields like outputs.
+  return {
+    ...pick(params, LlmSettingParamKeys),
+    keywords: {
+      enabled: isKeywordsEnabled,
+      top_n: keywordsTopN,
+      system_prompt: keywordsSysPrompt,
+    },
+    questions: {
+      enabled: isQuestionsEnabled,
+      top_n: questionsTopN,
+      system_prompt: questionsSysPrompt,
+    },
+    tags: {
+      enabled: isTagsEnabled,
+      top_n: tagsTopN,
+      tag_file_id: tagFileId,
+    },
+    summary: {
+      enabled: isSummaryEnabled,
+      system_prompt: summarySysPrompt,
+    },
+    metadata: {
+      enabled: isMetadataEnabled,
+      metadata: metadataList,
+      built_in_metadata: builtInMetadataList,
+    },
+  };
+}
+
+// The Compiler reads the compilation template group plus the same LLM runtime
+// settings as the Extractor; display-only fields like outputs are dropped.
+export function transformCompilationParams(
+  params: Record<string, any>,
+): Record<string, any> {
+  return {
+    compilation_template_group_id: params?.compilation_template_group_id,
+    ...pick(params, LlmSettingParamKeys),
+  };
+}
+
+function transformDataOperationsParams(params: DataOperationsFormSchemaType) {
+  return {
+    ...params,
+    select_keys: params?.select_keys?.map((x) => x.name),
+    remove_keys: params?.remove_keys?.map((x) => x.name),
+    query: params.query.map((x) => x.input),
+  };
+}
+
+export function transformArrayToObject(
+  list?: Array<{ key: string; value: string }>,
+) {
+  if (!Array.isArray(list)) return {};
+  return list?.reduce<Record<string, any>>((pre, cur) => {
+    if (cur.key) {
+      pre[cur.key] = cur.value;
+    }
+    return pre;
+  }, {});
+}
+
+function transformRequestSchemaToJsonschema(
+  schema: BeginFormSchemaType['schema'],
+) {
+  const jsonSchema: Record<string, any> = {};
+  Object.entries(schema || {}).forEach(([key, value]) => {
+    if (Array.isArray(value)) {
+      jsonSchema[key] = {
+        type: 'object',
+        required: value.filter((x) => x.required).map((x) => x.key),
+        properties: value.reduce<Record<string, any>>((pre, cur) => {
+          pre[cur.key] = { type: cur.type };
+          return pre;
+        }, {}),
+      };
+    }
+  });
+
+  return jsonSchema;
+}
+
+function transformBeginParams(params: BeginFormSchemaType) {
+  if (params.mode === AgentDialogueMode.Webhook) {
+    const security = params.security;
+    const nextSecurity: Omit<
+      NonNullable<BeginFormSchemaType['security']>,
+      'ip_whitelist' | 'jwt'
+    > & {
+      ip_whitelist?: string[];
+      jwt?: Omit<
+        NonNullable<BeginFormSchemaType['security']>['jwt'],
+        'required_claims'
+      > & {
+        required_claims?: string[];
+      };
+    } = {
+      ...((security ?? {}) as Omit<
+        NonNullable<BeginFormSchemaType['security']>,
+        'ip_whitelist' | 'jwt'
+      >),
+      ip_whitelist: params.security?.ip_whitelist.map((x) => x.value),
+    };
+
+    if (params.security?.auth_type === WebhookSecurityAuthType.Jwt) {
+      nextSecurity.jwt = {
+        ...security?.jwt,
+        required_claims: security?.jwt?.required_claims.map((x) => x.value),
+      };
+    }
+    if (
+      params.security?.auth_type === WebhookSecurityAuthType.None &&
+      params.security?.allow_anonymous
+    ) {
+      nextSecurity.allow_anonymous = true;
+    } else {
+      delete nextSecurity.allow_anonymous;
+    }
+    return {
+      ...params,
+      schema: transformRequestSchemaToJsonschema(params.schema),
+      security: nextSecurity,
+    };
+  }
+
+  return {
+    ...params,
+  };
+}
+
+// construct a dsl based on the node information of the graph
+export const buildDslComponentsByGraph = (
+  nodes: RAGFlowNodeType[],
+  edges: Edge[],
+  oldDslComponents: DSLComponents,
+): DSLComponents => {
+  const components: DSLComponents = {};
+
+  nodes
+    ?.filter(
+      (x) =>
+        !ExcludeOperators.some((y) => y === x.data.label) &&
+        !isBottomSubAgent(edges, x.id),
+    )
+    .forEach((x) => {
+      const id = x.id;
+      const operatorName = x.data.label;
+      let params = x?.data.form ?? {};
+
+      switch (operatorName) {
+        case Operator.Agent: {
+          const { params: formData } = buildAgentTools(edges, nodes, id);
+          params = {
+            ...formData,
+            exception_goto: buildAgentExceptionGoto(edges, id),
+          };
+          break;
+        }
+        case Operator.Categorize:
+          params = buildCategorize(edges, nodes, id);
+          break;
+
+        case Operator.Switch: {
+          const switchParams = params as ISwitchForm;
+          const branchEdges = edges.filter((edge) => edge.source === id);
+          params = {
+            ...switchParams,
+            conditions: (switchParams.conditions ?? []).map(
+              (condition, index) => ({
+                ...condition,
+                to: filterTargetsBySourceHandleId(
+                  branchEdges,
+                  generateSwitchHandleText(index),
+                ),
+              }),
+            ),
+            [SwitchElseTo]: filterTargetsBySourceHandleId(
+              branchEdges,
+              SwitchElseTo,
+            ),
+          };
+          break;
+        }
+
+        case Operator.Parser:
+          params = transformParserParams(params);
+          break;
+
+        case Operator.TokenChunker:
+          params = transformTokenChunkerParams(params);
+          break;
+
+        case Operator.GeneralChunker:
+          params = transformGeneralChunkerParams(params);
+          break;
+
+        case Operator.TitleChunker:
+          params = transformTitleChunkerParams(params);
+          break;
+        case Operator.ManualChunker:
+          // These fields are UI-only for the manual chunker and are not read
+          // by the backend ManualChunker component (manual.go pins method=group,
+          // ignores the token cap).
+          params = transformTitleChunkerParams(
+            omit(params, [
+              'include_heading_content',
+              'chunk_token_cap',
+              'hierarchyChunkTokenCap',
+              'groupChunkTokenCap',
+            ]) as any,
+          );
+          break;
+        case Operator.Extractor:
+          params = transformExtractorParams(params);
+          break;
+        case Operator.DataOperations:
+          params = transformDataOperationsParams(params);
+          break;
+        case Operator.Begin:
+          params = transformBeginParams(params);
+          break;
+        case Operator.UserFillUp:
+          if (Array.isArray(params.inputs)) {
+            params = {
+              ...params,
+              inputs: params.inputs.reduce(
+                (inputs, { key, ...value }) => {
+                  inputs[key] = value;
+                  return inputs;
+                },
+                {} as Record<string, Omit<BeginQuery, 'key'>>,
+              ),
+            };
+          }
+          break;
+        default:
+          break;
+      }
+
+      components[id] = {
+        obj: {
+          ...(oldDslComponents[id]?.obj ?? {}),
+          component_name: operatorName,
+          params: buildOperatorParams(operatorName)(params) ?? {},
+        },
+        downstream: buildComponentDownstreamOrUpstream(edges, id, true, nodes),
+        upstream: buildComponentDownstreamOrUpstream(edges, id, false, nodes),
+        parent_id: x?.parentId,
+      };
+    });
+
+  return components;
+};
+
+export const buildDslGlobalVariables = (
+  dsl: DSL,
+  globalVariables?: Record<string, GlobalVariableType>,
+) => {
+  if (!globalVariables) {
+    return { globals: dsl.globals, variables: dsl.variables || {} };
+  }
+
+  const globalVariablesTemp: Record<string, any> = {};
+  const globalSystem: Record<string, any> = {};
+  Object.keys(dsl.globals)?.forEach((key) => {
+    if (key.indexOf('sys') > -1) {
+      globalSystem[key] = dsl.globals[key];
+    }
+  });
+  Object.keys(globalVariables).forEach((key) => {
+    globalVariablesTemp['env.' + key] = globalVariables[key].value;
+  });
+
+  const globalVariablesResult = {
+    ...globalSystem,
+    ...globalVariablesTemp,
+  };
+  return { globals: globalVariablesResult, variables: globalVariables };
+};
+
+// TODO: This is caused by `useSendMessageBySSE`; it is recommended to sort out the logic.
+export const receiveMessageError = (res: any) =>
+  res &&
+  (res?.response.status !== 200 ||
+    (typeof res?.data?.code === 'number' && res.data.code !== 0));
+
+// Replace the id in the object with text
+export const replaceIdWithText = (
+  obj: Record<string, unknown> | unknown[] | unknown,
+  getNameById: (id?: string) => string | undefined,
+) => {
+  if (isObject(obj)) {
+    const ret: Record<string, unknown> | unknown[] = Array.isArray(obj)
+      ? []
+      : {};
+    Object.keys(obj).forEach((key) => {
+      const val = (obj as Record<string, unknown>)[key];
+      const text = typeof val === 'string' ? getNameById(val) : undefined;
+      (ret as Record<string, unknown>)[key] = text
+        ? text
+        : replaceIdWithText(val, getNameById);
+    });
+
+    return ret;
+  }
+
+  return obj;
+};
+
+export const isEdgeEqual = (previous: Edge, current: Edge) =>
+  previous.source === current.source &&
+  previous.target === current.target &&
+  previous.sourceHandle === current.sourceHandle;
+
+export const buildNewPositionMap = (
+  currentKeys: string[],
+  previousPositionMap: Record<string, IPosition>,
+) => {
+  // index in use
+  const indexesInUse = Object.values(previousPositionMap).map((x) => x.idx);
+  const previousKeys = Object.keys(previousPositionMap);
+  const intersectionKeys = intersectionWith(
+    previousKeys,
+    currentKeys,
+    (categoryDataKey: string, positionMapKey: string) =>
+      categoryDataKey === positionMapKey,
+  );
+  // difference set
+  const currentDifferenceKeys = currentKeys.filter(
+    (x) => !intersectionKeys.some((y: string) => y === x),
+  );
+  const newPositionMap = currentDifferenceKeys.reduce<
+    Record<string, IPosition>
+  >((pre, cur) => {
+    // take a coordinate
+    const effectiveIdxes = CategorizeAnchorPointPositions.map(
+      (_, idx) => idx,
+    ).filter((x) => !indexesInUse.some((y) => y === x));
+    const idx = sample(effectiveIdxes);
+    if (idx !== undefined) {
+      indexesInUse.push(idx);
+      pre[cur] = { ...CategorizeAnchorPointPositions[idx], idx };
+    }
+
+    return pre;
+  }, {});
+
+  return { intersectionKeys, newPositionMap };
+};
+
+export const isKeysEqual = (currentKeys: string[], previousKeys: string[]) => {
+  return isEqual(currentKeys.sort(), previousKeys.sort());
+};
+
+export const getOperatorIndex = (handleTitle: string) => {
+  return handleTitle.split(' ').at(-1);
+};
+
+export const getNodeDragHandle = (nodeType?: string) => {
+  return nodeType === Operator.Note ? '.note-drag-handle' : undefined;
+};
+
+const splitName = (name: string) => {
+  const names = name.split('_');
+  const type = names.at(0);
+  const index = Number(names.at(-1));
+
+  return { type, index };
+};
+
+export const generateNodeNamesWithIncreasingIndex = (
+  name: string,
+  nodes: RAGFlowNodeType[],
+) => {
+  const templateNameList = nodes
+    .filter((x) => {
+      const temporaryName = x.data.name;
+
+      // The first node of a type has no numeric suffix and occupies index 0
+      if (temporaryName === name) {
+        return true;
+      }
+
+      const { type, index } = splitName(temporaryName);
+
+      return (
+        temporaryName.match(/_/g)?.length === 1 &&
+        type === name &&
+        !isNaN(index)
+      );
+    })
+    .map((x) => {
+      const temporaryName = x.data.name;
+      const { index } = splitName(temporaryName);
+
+      return {
+        idx: temporaryName === name ? 0 : index,
+        name: temporaryName,
+      };
+    })
+    .sort((a, b) => a.idx - b.idx);
+
+  let index: number = 0;
+  for (let i = 0; i < templateNameList.length; i++) {
+    const idx = templateNameList[i]?.idx;
+    const nextIdx = templateNameList[i + 1]?.idx;
+    if (idx + 1 !== nextIdx) {
+      index = idx + 1;
+      break;
+    }
+  }
+
+  return index === 0 ? name : `${name}_${index}`;
+};
+
+export const duplicateNodeForm = (nodeData?: RAGFlowNodeType['data']) => {
+  const form: Record<string, any> = { ...(nodeData?.form ?? {}) };
+
+  // Delete the downstream node corresponding to the to field of the Categorize operator
+  if (nodeData?.label === Operator.Categorize) {
+    form.category_description = Object.keys(
+      form?.category_description ?? {},
+    ).reduce<Record<string, Record<string, any>>>((pre, cur) => {
+      pre[cur] = {
+        ...form.category_description[cur],
+        to: undefined,
+      };
+      return pre;
+    }, {});
+  }
+
+  return {
+    ...(nodeData ?? { label: '' }),
+    form,
+  };
+};
+
+export const getDrawerWidth = () => {
+  return window.innerWidth > 1278 ? '40%' : 470;
+};
+
+export const needsSingleStepDebugging = (label: string) => {
+  return !NoDebugOperatorsList.some((x) => (label as Operator) === x);
+};
+
+export function showCopyIcon(label: string) {
+  return !NoCopyOperatorsList.some((x) => (label as Operator) === x);
+}
+
+// Get the coordinates of the node relative to the Iteration node
+export function getRelativePositionToIterationNode(
+  nodes: RAGFlowNodeType[],
+  position?: XYPosition, // relative position
+) {
+  if (!position) {
+    return;
+  }
+
+  const iterationNodes = nodes.filter(
+    (node) => node.data.label === Operator.Iteration,
+  );
+
+  for (const iterationNode of iterationNodes) {
+    const {
+      position: { x, y },
+      width,
+      height,
+    } = iterationNode;
+    const halfWidth = (width || 0) / 2;
+    if (
+      position.x >= x - halfWidth &&
+      position.x <= x + halfWidth &&
+      position.y >= y &&
+      position.y <= y + (height || 0)
+    ) {
+      return {
+        parentId: iterationNode.id,
+        position: { x: position.x - x + halfWidth, y: position.y - y },
+      };
+    }
+  }
+}
+
+export const generateDuplicateNode = (
+  position?: XYPosition,
+  label?: string,
+) => {
+  const nextPosition = {
+    x: (position?.x || 0) + 50,
+    y: (position?.y || 0) + 50,
+  };
+
+  return {
+    selected: false,
+    dragging: false,
+    id: `${label}:${humanId()}`,
+    position: nextPosition,
+    dragHandle: getNodeDragHandle(label),
+  };
+};
+
+export function convertToStringArray(
+  list?: Array<{ value: string | number | boolean }>,
+) {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  return list.map((x) => x.value);
+}
+
+export function convertToObjectArray<T extends string | number | boolean>(
+  list: Array<T>,
+) {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  return list.map((x) => ({ value: x }));
+}
+
+/**
+ * Message accepts text/content strings or content arrays; every entry must
+ * be a non-blank string to match backend execution validation.
+ */
+export function isEmptyMessageContent(content?: unknown): boolean {
+  if (typeof content === 'string') {
+    return content.trim() === '';
+  }
+  return (
+    !Array.isArray(content) ||
+    content.length === 0 ||
+    content.some((item) => typeof item !== 'string' || item.trim() === '')
+  );
+}
+
+/**
+   * convert the following object into a list
+   *
+   * {
+      "product_related": {
+      "description": "The question is about product usage, appearance and how it works.",
+      "examples": "Why it always beaming?\nHow to install it onto the wall?\nIt leaks, what to do?",
+      "to": "generate:0"
+      }
+      }
+*/
+export const buildCategorizeListFromObject = (
+  categorizeItem: ICategorizeItemResult,
+) => {
+  // Categorize's to field has two data sources, with edges as the data source.
+  // Changes in the edge or to field need to be synchronized to the form field.
+  return Object.keys(categorizeItem)
+    .reduce<Array<Omit<ICategorizeItem, 'uuid'>>>((pre, cur) => {
+      // synchronize edge data to the to field
+
+      pre.push({
+        name: cur,
+        ...categorizeItem[cur],
+        examples: convertToObjectArray(categorizeItem[cur].examples),
+      });
+      return pre;
+    }, [])
+    .sort((a, b) => a.index - b.index);
+};
+
+/**
+   * Convert the list in the following form into an object
+   * {
+    "items": [
+      {
+        "name": "Categorize 1",
+        "description": "111",
+        "examples": ["ddd"],
+        "to": "Retrieval:LazyEelsStick"
+      }
+     ]
+    }
+*/
+export const buildCategorizeObjectFromList = (list: Array<ICategorizeItem>) => {
+  return list.reduce<ICategorizeItemResult>((pre, cur) => {
+    if (cur?.name) {
+      pre[cur.name] = {
+        ...omit(cur, 'name', 'examples'),
+        examples: convertToStringArray(cur.examples) as string[],
+      };
+    }
+    return pre;
+  }, {});
+};
+
+export function getAgentNodeTools(agentNode?: RAGFlowNodeType) {
+  const tools: IAgentForm['tools'] = get(agentNode, 'data.form.tools', []);
+  return tools;
+}
+
+export function getAgentNodeMCP(agentNode?: RAGFlowNodeType) {
+  const tools: IAgentForm['mcp'] = get(agentNode, 'data.form.mcp', []);
+  return tools;
+}
+
+export function mapEdgeMouseEvent(
+  edges: Edge[],
+  edgeId: string,
+  isHovered: boolean,
+) {
+  const nextEdges = edges.map((element) =>
+    element.id === edgeId
+      ? {
+          ...element,
+          data: {
+            ...element.data,
+            isHovered,
+          },
+        }
+      : element,
+  );
+
+  return nextEdges;
+}
+
+export function buildBeginQueryWithObject(
+  inputs: Record<string, BeginQuery>,
+  values: BeginQuery[],
+) {
+  const nextInputs = Object.keys(inputs).reduce<Record<string, BeginQuery>>(
+    (pre, key) => {
+      const item = values.find((x) => x.key === key);
+      if (item) {
+        pre[key] = { ...item };
+      }
+      return pre;
+    },
+    {},
+  );
+
+  return nextInputs;
+}
+
+export function getArrayElementType(type: string) {
+  return typeof type === 'string' ? (type.match(/<([^>]+)>/)?.at(1) ?? '') : '';
+}
+
+export function buildConversationVariableSelectOptions() {
+  return buildSelectOptions(Object.values(TypesWithArray));
+}
+
+export const InputModeOptions = buildOptions(InputMode);

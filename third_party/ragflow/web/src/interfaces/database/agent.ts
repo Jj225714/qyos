@@ -1,0 +1,415 @@
+export interface ICategorizeItem {
+  name: string;
+  description?: string;
+  examples?: { value: string }[];
+  index: number;
+  to: string[];
+  uuid: string;
+}
+
+export type ICategorizeItemResult = Record<
+  string,
+  Omit<ICategorizeItem, 'name' | 'examples' | 'uuid'> & { examples: string[] }
+>;
+
+export interface ISwitchCondition {
+  items: ISwitchItem[];
+  logical_operator: string;
+  to: string[];
+}
+
+export interface ISwitchItem {
+  cpn_id: string;
+  operator: string;
+  value: string;
+}
+
+export interface ISwitchForm {
+  conditions: ISwitchCondition[];
+  end_cpn_ids: string[];
+  no: string;
+}
+
+import { AgentCategory } from '@/constants/agent';
+import { Edge, Node } from '@xyflow/react';
+import { IReference, Message } from './chat';
+import { ICompilationTemplateGroup } from './compilation-template';
+
+export type DSLComponents = Record<string, IOperator>;
+
+export interface DSL {
+  components: DSLComponents;
+  history: any[];
+  path?: string[];
+  answer?: any[];
+  graph?: IGraph;
+  messages?: Message[];
+  reference?: IReference[];
+  globals: Record<string, any>;
+  variables: Record<string, GlobalVariableType>;
+  retrieval: IReference[];
+}
+
+export interface IOperator {
+  obj: IOperatorNode;
+  downstream: string[];
+  upstream: string[];
+  parent_id?: string;
+}
+
+export interface IOperatorNode {
+  component_name: string;
+  params: Record<string, unknown>;
+}
+
+export declare interface IFlow {
+  avatar?: string;
+  canvas_type: null;
+  create_date: string;
+  create_time: number;
+  description: null;
+  dsl: DSL;
+  id: string;
+  title: string;
+  update_date: string;
+  update_time: number;
+  user_id: string;
+  tenant_id?: string;
+  permission: string;
+  nickname: string;
+  operator_permission: number;
+  canvas_category: string;
+  release?: boolean;
+  release_time?: number;
+  last_publish_time?: number;
+  tags?: string;
+}
+
+export interface ICanvasPresenceUser {
+  user_id: string;
+  display_name: string;
+  active_tab_count: number;
+  last_seen_at: number;
+  permission: number;
+}
+
+export interface ICanvasPresenceResponse {
+  canvas_id: string;
+  online_user_count: number;
+  operator_permission?: number;
+  users: ICanvasPresenceUser[];
+}
+
+export interface ICanvasPresenceHeartbeatData {
+  ok: boolean;
+  code?: string;
+}
+
+export interface IPresencePayload {
+  canvas_id: string;
+  tab_id: string;
+  presence_session_id: string;
+}
+// GET /agents merges compilation template groups into the agent list when no
+// canvas_category is requested; every item carries this discriminator.
+export enum AgentListItemType {
+  Agent = 'agent',
+  CompilationTemplateGroup = 'compilation_template_group',
+  BuiltinPipeline = 'builtin_pipeline',
+}
+
+// A built-in ingestion pipeline rendered as a read-only list item. Built-in
+// pipelines are static, non-DB resources served by GET /api/v1/pipelines; they
+// are composed into the agents list on the front end (mirroring PR #20603's
+// unified parser dropdown) rather than stored as user canvases, and are always
+// marked read-only (builtin: true). They are kept out of the AgentListItem
+// union because they never come from the server's agent list.
+export interface IBuiltinPipelineListItem extends IBuiltinPipeline {
+  canvas_category: string;
+  type: AgentListItemType.BuiltinPipeline;
+  builtin: true;
+}
+
+export type AgentListItem =
+  | (IFlow & { type?: AgentListItemType.Agent })
+  | (ICompilationTemplateGroup & {
+      type: AgentListItemType.CompilationTemplateGroup;
+    });
+
+export interface IFlowTemplate {
+  avatar: string;
+  canvas_type: string;
+  canvas_types?: string[];
+  create_date: string;
+  create_time: number;
+  canvas_category?: string;
+  dsl: DSL;
+  id: string;
+  update_date: string;
+  update_time: number;
+  description: {
+    en: string;
+    zh: string;
+    de: string;
+  };
+  title: {
+    en: string;
+    zh: string;
+    de: string;
+  };
+}
+
+export interface IGenerateForm {
+  max_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  cite?: boolean;
+  prompt: number;
+  llm_id: string;
+  tenant_llm_id?: string;
+  parameters: { key: string; component_id: string };
+}
+
+export interface ICategorizeForm extends IGenerateForm {
+  category_description: ICategorizeItemResult;
+  items: ICategorizeItem[];
+}
+
+export interface IRelevantForm extends IGenerateForm {
+  yes: string;
+  no: string;
+}
+
+export interface ISwitchItem {
+  cpn_id: string;
+  operator: string;
+  value: string;
+}
+
+export interface ISwitchForm {
+  conditions: ISwitchCondition[];
+  end_cpn_id: string;
+  no: string;
+}
+
+export interface IBeginForm {
+  prologue?: string;
+}
+
+export interface IRetrievalForm {
+  similarity_threshold?: number;
+  keywords_similarity_weight?: number;
+  top_n?: number;
+  rerank_candidates_count?: number;
+  top_k?: number;
+  rerank_id?: string;
+  tenant_rerank_id?: string;
+  dataset_ids?: string[];
+}
+
+export interface ICodeForm {
+  arguments: Record<string, string>;
+  lang: string;
+  script?: string;
+  outputs: Record<string, { value: unknown; type: string }>;
+}
+
+export interface IAgentForm {
+  sys_prompt: string;
+  prompts: Array<{
+    role: string;
+    content: string;
+  }>;
+  max_retries: number;
+  delay_after_error: number;
+  visual_files_var: string;
+  max_rounds: number;
+  exception_method: Nullable<'comment' | 'go'>;
+  exception_comment: any;
+  exception_goto: any;
+  tools: Array<{
+    name: string;
+    component_name: string;
+    id: string;
+    params: Record<string, any>;
+  }>;
+  mcp: Array<{
+    mcp_id: string;
+    tools: Record<string, Record<string, any>>;
+  }>;
+  outputs: {
+    structured_output: Record<string, Record<string, any>>;
+    content: Record<string, any>;
+  };
+}
+
+export type BaseNodeData<TForm = any> = {
+  label: string; // operator type
+  name: string; // operator name
+  color?: string;
+  form?: TForm;
+  operatorId?: string;
+};
+
+export type BaseNode<T = any> = Node<BaseNodeData<T>>;
+
+export type IBeginNode = BaseNode<IBeginForm>;
+export type IRetrievalNode = BaseNode<IRetrievalForm>;
+export type IGenerateNode = BaseNode<IGenerateForm>;
+export type ICategorizeNode = BaseNode<ICategorizeForm>;
+export type ISwitchNode = BaseNode<ISwitchForm>;
+export type IRagNode = BaseNode;
+export type IRelevantNode = BaseNode;
+export type ILogicNode = BaseNode;
+export type INoteNode = BaseNode;
+export type IMessageNode = BaseNode;
+export type IInvokeNode = BaseNode;
+export type ITemplateNode = BaseNode;
+export type IEmailNode = BaseNode;
+export type IIterationNode = BaseNode;
+export type IIterationStartNode = BaseNode;
+export type IKeywordNode = BaseNode;
+export type ICodeNode = BaseNode<ICodeForm>;
+export type IAgentNode = BaseNode;
+export type IToolNode = BaseNode<IAgentForm>;
+
+export type RAGFlowNodeType =
+  | IBeginNode
+  | IRetrievalNode
+  | IGenerateNode
+  | ICategorizeNode
+  | ISwitchNode
+  | IRagNode
+  | IRelevantNode
+  | ILogicNode
+  | INoteNode
+  | IMessageNode
+  | IInvokeNode
+  | ITemplateNode
+  | IEmailNode
+  | IIterationNode
+  | IIterationStartNode
+  | IKeywordNode;
+
+export interface IGraph {
+  nodes: RAGFlowNodeType[];
+  edges: Edge[];
+}
+
+export interface ITraceData {
+  component_id: string;
+  trace: Array<Record<string, any>>;
+}
+
+export interface IModelInputSnapshot {
+  calls: Array<{
+    sequence: number;
+    model: string;
+    status: 'captured' | 'omitted';
+    messages?: Record<string, unknown>[];
+    reason?: 'unsupported_content' | 'size_limit' | 'serialization_error';
+  }>;
+  omitted_count: number;
+}
+
+export interface ISingleDebugCaptureData {
+  outputs: Record<string, unknown> | null;
+  model_inputs: IModelInputSnapshot;
+}
+
+export interface IAgentLogResponse {
+  id: string;
+  message: IAgentLogMessage[];
+  update_date: string;
+  create_date: string;
+  update_time: number;
+  create_time: number;
+  round: number;
+  thumb_up: number;
+  errors: string;
+  source: string;
+  user_id: string;
+  dsl: string;
+  name: string;
+  version_title: string;
+  is_new?: boolean;
+}
+export interface IAgentLogsResponse {
+  total: number;
+  sessions: IAgentLogResponse[];
+}
+export interface IAgentLogsRequest {
+  include_history?: boolean;
+  include_reference?: boolean;
+  include_prompt?: boolean;
+  keywords?: string;
+  to_date?: string | Date;
+  from_date?: string | Date;
+  orderby?: string;
+  desc?: boolean;
+  page?: number;
+  page_size?: number;
+  exp_user_id?: string; // tenant id
+}
+
+export interface IAgentLogMessage {
+  content: string;
+  role: 'user' | 'assistant';
+  reference?: IReference;
+  id: string;
+}
+
+export interface IPipeLineListRequest {
+  page?: number;
+  page_size?: number;
+  keywords?: string;
+  orderby?: string;
+  desc?: boolean;
+  canvas_category?: AgentCategory;
+  ext?: string;
+}
+
+export interface IBuiltinPipeline {
+  id: string;
+  title: string;
+  description?: string;
+  filename?: string;
+}
+
+export interface IBuiltinPipelineListResponse {
+  canvas: IBuiltinPipeline[];
+  total: number;
+}
+
+export interface GlobalVariableType {
+  name: string;
+  value: any;
+  description: string;
+  type: string;
+}
+
+export interface IWebhookTrace {
+  webhook_id: null;
+  events: any[];
+  next_since_ts: number;
+  finished: boolean;
+}
+
+export interface IAgentWebhookCredential {
+  credential: string;
+  webhook_url: string;
+}
+
+export interface IAgentVersionMetadata {
+  id: string;
+  name: string;
+  alias: string;
+}
+
+export interface IAgentVersionCatalogItem {
+  id: string;
+  name: string;
+  versions: IAgentVersionMetadata[];
+}

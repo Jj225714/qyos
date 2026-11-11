@@ -1,0 +1,513 @@
+/*
+ *  Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+import message from '@/components/ui/message';
+import { TenantRole } from '@/ee/constants/team';
+import { ResponseGetType } from '@/interfaces/database/base';
+import { IToken } from '@/interfaces/database/chat';
+import { ITenantInfo } from '@/interfaces/database/dataset';
+import { ILangfuseConfig } from '@/interfaces/database/system';
+import {
+  ITenant,
+  ITenantUser,
+  IUserInfo,
+} from '@/interfaces/database/user-setting';
+import { ISetLangfuseConfigRequestBody } from '@/interfaces/request/system';
+import { DEFAULT_LANGUAGE_CODE, supportedLanguages } from '@/locales/config';
+import kbService from '@/services/knowledge-service';
+import userService, {
+  addTenantUser,
+  agreeTenant,
+  deleteTenantUser,
+  listTenant,
+  listTenantUser,
+} from '@/services/user-service';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useFetchDefaultModelDictionary } from './use-llm-request';
+
+export const enum UserSettingApiAction {
+  UserInfo = 'userInfo',
+  TenantInfo = 'tenantInfo',
+  SaveSetting = 'saveSetting',
+  FetchManualSystemTokenList = 'fetchManualSystemTokenList',
+  FetchSystemTokenList = 'fetchSystemTokenList',
+  RemoveSystemToken = 'removeSystemToken',
+  CreateSystemToken = 'createSystemToken',
+  ListTenantUser = 'listTenantUser',
+  AddTenantUser = 'addTenantUser',
+  DeleteTenantUser = 'deleteTenantUser',
+  ListTenant = 'listTenant',
+  AgreeTenant = 'agreeTenant',
+  SetLangfuseConfig = 'setLangfuseConfig',
+  DeleteLangfuseConfig = 'deleteLangfuseConfig',
+  ListPipelines = 'listPipelines',
+  FetchLangfuseConfig = 'fetchLangfuseConfig',
+}
+
+export const useFetchUserInfo = (): ResponseGetType<IUserInfo> => {
+  const { data, isFetching: loading } = useQuery({
+    queryKey: [UserSettingApiAction.UserInfo],
+    initialData: {},
+    gcTime: 0,
+    queryFn: async () => {
+      const { data } = await userService.userInfo();
+
+      if (data.code === 0) {
+        const targetLng =
+          supportedLanguages.find((lang) => lang.code === data.data.language)
+            ?.code ?? DEFAULT_LANGUAGE_CODE;
+
+        return Object.assign({}, data.data, {
+          language: targetLng,
+        });
+      }
+
+      return data.data ?? {};
+    },
+  });
+
+  return { data, loading };
+};
+
+/**
+ * @param enabled Set to `false` where the tenant endpoint is not part of the
+ *   page's contract (e.g. the admin gateway, which serves every tenant and
+ *   has no `/users/me/models`). Defaults to `true`, so existing callers are
+ *   unchanged.
+ */
+export const useFetchTenantData = (
+  enabled: boolean = true,
+): ResponseGetType<ITenantInfo> => {
+  const { data, isFetching: loading } = useQuery({
+    queryKey: [UserSettingApiAction.TenantInfo],
+    initialData: {},
+    gcTime: 0,
+    enabled,
+    queryFn: async () => {
+      const { data: res } = await userService.getTenantInfo();
+      if (res.code === 0) {
+        return res.data ?? {};
+      }
+
+      return res ?? {};
+    },
+  });
+  return { data, loading };
+};
+
+export const useFetchTenantInfo = useFetchTenantData;
+
+export const useSelectParserList = (): Array<{
+  value: string;
+  label: string;
+}> => {
+  const { t } = useTranslation();
+
+  // Fetch the pipeline catalog dynamically.
+  const { data: pipelineListData } = useQuery({
+    queryKey: [UserSettingApiAction.ListPipelines],
+    queryFn: async () => {
+      const { data } = await kbService.listPipelines();
+      return data;
+    },
+    staleTime: Infinity,
+  });
+  useFetchDefaultModelDictionary(true);
+
+  const defaultParsers = useMemo(
+    () => [
+      { value: 'naive', label: t('knowledgeConfiguration.parserLabel.naive') },
+      { value: 'qa', label: t('knowledgeConfiguration.parserLabel.qa') },
+      {
+        value: 'resume',
+        label: t('knowledgeConfiguration.parserLabel.resume'),
+      },
+      {
+        value: 'manual',
+        label: t('knowledgeConfiguration.parserLabel.manual'),
+      },
+      { value: 'table', label: t('knowledgeConfiguration.parserLabel.table') },
+      { value: 'paper', label: t('knowledgeConfiguration.parserLabel.paper') },
+      { value: 'book', label: t('knowledgeConfiguration.parserLabel.book') },
+      { value: 'laws', label: t('knowledgeConfiguration.parserLabel.laws') },
+      {
+        value: 'presentation',
+        label: t('knowledgeConfiguration.parserLabel.presentation'),
+      },
+      {
+        value: 'picture',
+        label: t('knowledgeConfiguration.parserLabel.picture'),
+      },
+      { value: 'one', label: t('knowledgeConfiguration.parserLabel.one') },
+      { value: 'audio', label: t('knowledgeConfiguration.parserLabel.audio') },
+      { value: 'email', label: t('knowledgeConfiguration.parserLabel.email') },
+      { value: 'tag', label: t('knowledgeConfiguration.parserLabel.tag') },
+    ],
+    [t],
+  );
+
+  const parserList = useMemo(() => {
+    // Prefer the dynamic pipeline catalog from the API.
+    // GET /api/v1/pipelines?type=builtin responds with
+    // { code, data: { canvas: [{ id, title, description, filename }], total } }.
+    const pipelineList: Array<{
+      id: string;
+      title: string;
+      description?: string;
+      filename?: string;
+    }> = pipelineListData?.data?.canvas ?? [];
+    if (pipelineList.length > 0) {
+      const labelFromAPI = (parserId: string, title: string) => {
+        const key = `knowledgeConfiguration.parserLabel.${parserId}`;
+        const translated = t(key);
+        return translated !== key ? translated : title;
+      };
+      return pipelineList.map((item) => ({
+        value: item.id,
+        label: labelFromAPI(item.id, item.title),
+      }));
+    }
+
+    // Fallback: the hardcoded default parsers.
+    return defaultParsers;
+  }, [defaultParsers, pipelineListData, t]);
+
+  return parserList;
+};
+
+export const useSaveSetting = (silent = false) => {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.SaveSetting],
+    mutationFn: async (
+      userInfo: { new_password: string } | Partial<IUserInfo>,
+    ) => {
+      const { data } = await userService.setting(userInfo);
+      if (data.code === 0) {
+        if (!silent) {
+          message.success(t('message.modified'));
+        }
+        queryClient.invalidateQueries({ queryKey: ['userInfo'] });
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, saveSetting: mutateAsync };
+};
+
+export const useFetchSystemVersion = () => {
+  const [version, setVersion] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const fetchSystemVersion = useCallback(async () => {
+    try {
+      setLoading(true);
+      const { data } = await userService.getSystemVersion();
+      if (data.code === 0) {
+        setVersion(data.data.version);
+        setLoading(false);
+      }
+    } catch (error) {
+      console.warn(error);
+      setLoading(false);
+    }
+  }, []);
+
+  return { fetchSystemVersion, version, loading };
+};
+
+export const useFetchManualSystemTokenList = () => {
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.FetchManualSystemTokenList],
+    mutationFn: async () => {
+      const { data } = await userService.listToken();
+
+      return data?.data ?? [];
+    },
+  });
+
+  return { data, loading, fetchSystemTokenList: mutateAsync };
+};
+
+export const useFetchSystemTokenList = () => {
+  const {
+    data,
+    isFetching: loading,
+    refetch,
+  } = useQuery<IToken[]>({
+    queryKey: [UserSettingApiAction.FetchSystemTokenList],
+    initialData: [],
+    gcTime: 0,
+    queryFn: async () => {
+      const { data } = await userService.listToken();
+
+      return data?.data ?? [];
+    },
+  });
+
+  return { data, loading, refetch };
+};
+
+export const useRemoveSystemToken = () => {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.RemoveSystemToken],
+    mutationFn: async (token: string) => {
+      const { data } = await userService.removeToken({}, token);
+      if (data.code === 0) {
+        message.success(t('message.deleted'));
+        queryClient.invalidateQueries({
+          queryKey: [UserSettingApiAction.FetchSystemTokenList],
+        });
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, removeToken: mutateAsync };
+};
+
+export const useCreateSystemToken = () => {
+  const queryClient = useQueryClient();
+
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.CreateSystemToken],
+    mutationFn: async (params: Record<string, any>) => {
+      const { data } = await userService.createToken(params);
+      if (data.code === 0) {
+        queryClient.invalidateQueries({
+          queryKey: [UserSettingApiAction.FetchSystemTokenList],
+        });
+      }
+      return data?.data ?? [];
+    },
+  });
+
+  return { data, loading, createToken: mutateAsync };
+};
+
+export const useListTenantUser = (
+  tenantId: string,
+  excludePendingInvitations = false,
+) => {
+  const {
+    data,
+    isFetching: loading,
+    refetch,
+  } = useQuery<ITenantUser[]>({
+    queryKey: [UserSettingApiAction.ListTenantUser, tenantId],
+    initialData: [],
+    gcTime: 0,
+    enabled: !!tenantId,
+    select: (data) =>
+      excludePendingInvitations
+        ? data.filter((x) => x.role !== TenantRole.Invite)
+        : data,
+    queryFn: async () => {
+      const { data } = await listTenantUser(tenantId);
+
+      return data?.data ?? [];
+    },
+  });
+
+  return { data, loading, refetch };
+};
+
+export const useAddTenantUser = () => {
+  const { data: tenantInfo } = useFetchTenantInfo();
+  const queryClient = useQueryClient();
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.AddTenantUser],
+    mutationFn: async (email: string) => {
+      const { data } = await addTenantUser(tenantInfo.tenant_id, email);
+      if (data.code === 0) {
+        queryClient.invalidateQueries({
+          queryKey: [UserSettingApiAction.ListTenantUser],
+        });
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, addTenantUser: mutateAsync };
+};
+
+export const useDeleteTenantUser = () => {
+  const { data: tenantInfo } = useFetchTenantInfo();
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.DeleteTenantUser],
+    mutationFn: async ({
+      userId,
+      tenantId,
+    }: {
+      userId: string;
+      tenantId?: string;
+    }) => {
+      const { data } = await deleteTenantUser({
+        tenantId: tenantId ?? tenantInfo.tenant_id,
+        userId,
+      });
+      if (data.code === 0) {
+        message.success(t('message.deleted'));
+        // Refresh the member table; the tenant list also changes when the
+        // deleted user is the current user quitting a team.
+        queryClient.invalidateQueries({
+          queryKey: [UserSettingApiAction.ListTenantUser],
+        });
+        queryClient.invalidateQueries({
+          queryKey: [UserSettingApiAction.ListTenant],
+        });
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, deleteTenantUser: mutateAsync };
+};
+
+export const useListTenant = () => {
+  const { data: tenantInfo } = useFetchTenantInfo();
+  const tenantId = tenantInfo.tenant_id;
+  const {
+    data,
+    isFetching: loading,
+    refetch,
+  } = useQuery<ITenant[]>({
+    queryKey: [UserSettingApiAction.ListTenant, tenantId],
+    initialData: [],
+    gcTime: 0,
+    enabled: !!tenantId,
+    queryFn: async () => {
+      const { data } = await listTenant();
+
+      return Array.isArray(data?.data) ? data.data : [];
+    },
+  });
+
+  return { data, loading, refetch };
+};
+
+export const useAgreeTenant = () => {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.AgreeTenant],
+    mutationFn: async (tenantId: string) => {
+      const { data } = await agreeTenant(tenantId);
+      if (data.code === 0) {
+        message.success(t('message.operated'));
+        queryClient.invalidateQueries({
+          queryKey: [UserSettingApiAction.ListTenant],
+        });
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, agreeTenant: mutateAsync };
+};
+
+export const useSetLangfuseConfig = () => {
+  const { t } = useTranslation();
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.SetLangfuseConfig],
+    mutationFn: async (params: ISetLangfuseConfigRequestBody) => {
+      const { data } = await userService.setLangfuseConfig(params);
+      if (data.code === 0) {
+        message.success(t('message.operated'));
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, setLangfuseConfig: mutateAsync };
+};
+
+export const useDeleteLangfuseConfig = () => {
+  const { t } = useTranslation();
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: [UserSettingApiAction.DeleteLangfuseConfig],
+    mutationFn: async () => {
+      const { data } = await userService.deleteLangfuseConfig();
+      if (data.code === 0) {
+        message.success(t('message.deleted'));
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, deleteLangfuseConfig: mutateAsync };
+};
+
+export const useFetchLangfuseConfig = () => {
+  const { data, isFetching: loading } = useQuery<ILangfuseConfig>({
+    queryKey: [UserSettingApiAction.FetchLangfuseConfig],
+    gcTime: 0,
+    queryFn: async () => {
+      const { data } = await userService.getLangfuseConfig();
+
+      return data?.data;
+    },
+  });
+
+  return { data, loading };
+};

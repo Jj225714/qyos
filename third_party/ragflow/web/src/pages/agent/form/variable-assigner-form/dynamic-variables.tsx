@@ -1,0 +1,312 @@
+import { SelectWithSearch } from '@/components/originui/select-with-search';
+import { RAGFlowFormItem } from '@/components/ragflow-form';
+import { useIsDarkTheme } from '@/components/theme-provider';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Separator } from '@/components/ui/separator';
+import { Textarea } from '@/components/ui/textarea';
+import Editor, { loader } from '@monaco-editor/react';
+import * as RadioGroupPrimitive from '@radix-ui/react-radio-group';
+import { X } from 'lucide-react';
+import { ReactNode, forwardRef, useCallback } from 'react';
+import { useFieldArray, useFormContext } from 'react-hook-form';
+import {
+  JsonSchemaDataType,
+  VariableAssignerLogicalArrayOperator,
+  VariableAssignerLogicalNumberOperator,
+  VariableAssignerLogicalOperator,
+} from '../../constant';
+import { useGetVariableLabelOrTypeByValue } from '../../hooks/use-get-begin-query';
+import { getArrayElementType } from '../../utils';
+import { DynamicFormHeader } from '../components/dynamic-fom-header';
+import { QueryVariable } from '../components/query-variable';
+import { ParameterlessOperators } from './schema';
+import { useBuildLogicalOptions } from './use-build-logical-options';
+
+loader.config({ paths: { vs: '/vs' } });
+
+type SelectKeysProps = {
+  name: string;
+  label: ReactNode;
+  tooltip?: string;
+  keyField?: string;
+  valueField?: string;
+  operatorField?: string;
+};
+
+type RadioGroupProps = React.ComponentProps<typeof RadioGroupPrimitive.Root>;
+
+type RadioButtonProps = Partial<
+  Omit<RadioGroupProps, 'onValueChange'> & {
+    onChange: RadioGroupProps['onValueChange'];
+  }
+>;
+
+const RadioButton = forwardRef<HTMLDivElement, RadioButtonProps>(
+  function RadioButton({ value, onChange }, ref) {
+    return (
+      <RadioGroup
+        ref={ref}
+        defaultValue="yes"
+        className="flex"
+        value={value}
+        onValueChange={onChange}
+      >
+        <div className="flex items-center gap-3">
+          <RadioGroupItem value="yes" id="r1" />
+          <Label htmlFor="r1">Yes</Label>
+        </div>
+        <div className="flex items-center gap-3">
+          <RadioGroupItem value="no" id="r2" />
+          <Label htmlFor="r2">No</Label>
+        </div>
+      </RadioGroup>
+    );
+  },
+);
+
+const EmptyValueMap = {
+  [JsonSchemaDataType.String]: '',
+  [JsonSchemaDataType.Number]: 0,
+  [JsonSchemaDataType.Boolean]: 'yes',
+  [JsonSchemaDataType.Object]: '{}',
+  [JsonSchemaDataType.Array]: [],
+};
+
+type ObjectEditorProps = {
+  value?: any;
+  onChange?: (value: string) => void;
+};
+
+const ObjectEditor = forwardRef<HTMLDivElement, ObjectEditorProps>(
+  ({ value, onChange }, ref) => {
+    const isDarkTheme = useIsDarkTheme();
+
+    const stringValue =
+      typeof value === 'string' ? value : JSON.stringify(value ?? {});
+
+    return (
+      <div ref={ref}>
+        <Editor
+          height={300}
+          theme={isDarkTheme ? 'vs-dark' : 'vs'}
+          language="json"
+          value={stringValue}
+          onChange={(val) => onChange?.(val ?? '')}
+          options={{
+            minimap: { enabled: false },
+            automaticLayout: true,
+          }}
+        />
+      </div>
+    );
+  },
+);
+ObjectEditor.displayName = 'ObjectEditor';
+
+export function DynamicVariables({
+  name,
+  label,
+  tooltip,
+  keyField = 'variable',
+  valueField = 'parameter',
+  operatorField = 'operator',
+}: SelectKeysProps) {
+  const form = useFormContext();
+  const { getType } = useGetVariableLabelOrTypeByValue();
+
+  const { fields, remove, append } = useFieldArray({
+    name: name,
+    control: form.control,
+  });
+
+  const { buildLogicalOptions } = useBuildLogicalOptions();
+
+  const getVariableType = useCallback(
+    (keyFieldName: string) => {
+      const key = form.getValues(keyFieldName);
+      return getType(key);
+    },
+    [form, getType],
+  );
+
+  const renderParameter = useCallback(
+    (keyFieldName: string, operatorFieldName: string) => {
+      const logicalOperator = form.getValues(operatorFieldName);
+      const type = getVariableType(keyFieldName);
+
+      if (ParameterlessOperators.includes(logicalOperator)) {
+        return null;
+      } else if (
+        logicalOperator === VariableAssignerLogicalOperator.Overwrite ||
+        VariableAssignerLogicalArrayOperator.Extend === logicalOperator
+      ) {
+        return (
+          <QueryVariable types={[type]} hideLabel pureQuery></QueryVariable>
+        );
+      } else if (logicalOperator === VariableAssignerLogicalOperator.Set) {
+        if (type === JsonSchemaDataType.Boolean) {
+          return <RadioButton></RadioButton>;
+        }
+
+        if (type === JsonSchemaDataType.Number) {
+          return <Input className="w-full" type="number"></Input>;
+        }
+
+        if (type === JsonSchemaDataType.Object) {
+          return <ObjectEditor />;
+        }
+
+        if (type === JsonSchemaDataType.String) {
+          return <Textarea></Textarea>;
+        }
+      } else if (
+        Object.values(VariableAssignerLogicalNumberOperator).some(
+          (x) => logicalOperator === x,
+        )
+      ) {
+        return <Input className="w-full" type="number"></Input>;
+      } else if (
+        logicalOperator === VariableAssignerLogicalArrayOperator.Append
+      ) {
+        const subType = getArrayElementType(type);
+        return (
+          <QueryVariable
+            // A bare `array` type carries no element type; filtering by the
+            // empty string would hide every option. The backend accepts any
+            // element for an empty list, so leave the options unfiltered.
+            types={subType ? [subType as JsonSchemaDataType] : []}
+            hideLabel
+            pureQuery
+          ></QueryVariable>
+        );
+      }
+    },
+    [form, getVariableType],
+  );
+
+  const handleVariableChange = useCallback(
+    (operatorFieldAlias: string, valueFieldAlias: string) => {
+      return () => {
+        form.setValue(
+          operatorFieldAlias,
+          VariableAssignerLogicalOperator.Overwrite,
+          { shouldDirty: true, shouldValidate: true },
+        );
+
+        form.setValue(valueFieldAlias, '', {
+          shouldDirty: true,
+          shouldValidate: true,
+        });
+      };
+    },
+    [form],
+  );
+
+  const handleOperatorChange = useCallback(
+    (valueFieldAlias: string, keyFieldAlias: string, value: string) => {
+      const type = getVariableType(keyFieldAlias);
+
+      let parameter = EmptyValueMap[type as keyof typeof EmptyValueMap];
+
+      // Overwrite, Extend, and Append all render a QueryVariable (a
+      // string-valued reference select), so the parameter must be reset to a
+      // string — passing EmptyValueMap's [] for array-typed variables would
+      // crash cmdk, which calls .trim() on its controlled value.
+      if (
+        value === VariableAssignerLogicalOperator.Overwrite ||
+        value === VariableAssignerLogicalArrayOperator.Extend ||
+        value === VariableAssignerLogicalArrayOperator.Append
+      ) {
+        parameter = '';
+      }
+
+      if (value !== VariableAssignerLogicalOperator.Clear) {
+        form.setValue(valueFieldAlias, parameter, {
+          shouldDirty: true,
+          shouldValidate: true,
+        });
+      }
+
+      // The parameter input is hidden for these operators and its value is
+      // ignored at run time, so nothing re-validates the field — drop any
+      // stale error left over from the previous operator explicitly.
+      if (ParameterlessOperators.includes(value)) {
+        form.clearErrors(valueFieldAlias);
+      }
+    },
+    [form, getVariableType],
+  );
+
+  return (
+    <section className="space-y-2">
+      <DynamicFormHeader
+        label={label}
+        tooltip={tooltip}
+        onClick={() => append({ [keyField]: '', [valueField]: '' })}
+      ></DynamicFormHeader>
+
+      <div className="space-y-5">
+        {fields.map((field, index) => {
+          const keyFieldAlias = `${name}.${index}.${keyField}`;
+          const valueFieldAlias = `${name}.${index}.${valueField}`;
+          const operatorFieldAlias = `${name}.${index}.${operatorField}`;
+
+          return (
+            <section key={field.id} className="flex gap-2">
+              <div className="flex-1 space-y-3 min-w-0">
+                <div className="flex items-start">
+                  <QueryVariable
+                    name={keyFieldAlias}
+                    hideLabel
+                    className="flex-1 min-w-0"
+                    onChange={handleVariableChange(
+                      operatorFieldAlias,
+                      valueFieldAlias,
+                    )}
+                  ></QueryVariable>
+
+                  {/* h-8 matches the default Button height both select
+                      triggers render at; with items-start above, an error
+                      message under either select no longer pushes the dash
+                      or the operator select out of alignment. */}
+                  <div className="flex h-8 items-center">
+                    <Separator className="w-2" />
+                  </div>
+
+                  <RAGFlowFormItem name={operatorFieldAlias} className="w-1/3">
+                    {({ onChange, value }) => (
+                      <SelectWithSearch
+                        value={value}
+                        onChange={(val) => {
+                          handleOperatorChange(
+                            valueFieldAlias,
+                            keyFieldAlias,
+                            val,
+                          );
+                          onChange(val);
+                        }}
+                        options={buildLogicalOptions(
+                          getVariableType(keyFieldAlias),
+                        )}
+                      ></SelectWithSearch>
+                    )}
+                  </RAGFlowFormItem>
+                </div>
+                <RAGFlowFormItem name={valueFieldAlias} className="w-full">
+                  {renderParameter(keyFieldAlias, operatorFieldAlias)}
+                </RAGFlowFormItem>
+              </div>
+
+              <Button variant={'ghost'} onClick={() => remove(index)}>
+                <X />
+              </Button>
+            </section>
+          );
+        })}
+      </div>
+    </section>
+  );
+}

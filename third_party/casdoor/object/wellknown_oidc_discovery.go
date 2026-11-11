@@ -1,0 +1,445 @@
+// Copyright 2021 The Casdoor Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package object
+
+import (
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"strings"
+
+	"github.com/casdoor/casdoor/conf"
+	"github.com/casdoor/casdoor/edition"
+	"github.com/casdoor/casdoor/gm"
+	"github.com/casdoor/casdoor/util"
+	"github.com/go-jose/go-jose/v4"
+)
+
+type OidcDiscovery struct {
+	Issuer                                     string   `json:"issuer"`
+	AuthorizationEndpoint                      string   `json:"authorization_endpoint"`
+	TokenEndpoint                              string   `json:"token_endpoint"`
+	TokenEndpointAuthMethodsSupported          []string `json:"token_endpoint_auth_methods_supported"`
+	UserinfoEndpoint                           string   `json:"userinfo_endpoint"`
+	DeviceAuthorizationEndpoint                string   `json:"device_authorization_endpoint"`
+	RegistrationEndpoint                       string   `json:"registration_endpoint,omitempty"`
+	JwksUri                                    string   `json:"jwks_uri"`
+	IntrospectionEndpoint                      string   `json:"introspection_endpoint"`
+	RevocationEndpoint                         string   `json:"revocation_endpoint"`
+	ResponseTypesSupported                     []string `json:"response_types_supported"`
+	ResponseModesSupported                     []string `json:"response_modes_supported"`
+	GrantTypesSupported                        []string `json:"grant_types_supported"`
+	SubjectTypesSupported                      []string `json:"subject_types_supported"`
+	IdTokenSigningAlgValuesSupported           []string `json:"id_token_signing_alg_values_supported"`
+	ScopesSupported                            []string `json:"scopes_supported"`
+	CodeChallengeMethodsSupported              []string `json:"code_challenge_methods_supported"`
+	ClaimsSupported                            []string `json:"claims_supported"`
+	RequestParameterSupported                  bool     `json:"request_parameter_supported"`
+	RequestUriParameterSupported               bool     `json:"request_uri_parameter_supported"`
+	RequestObjectSigningAlgValuesSupported     []string `json:"request_object_signing_alg_values_supported"`
+	EndSessionEndpoint                         string   `json:"end_session_endpoint"`
+	BackchannelLogoutSupported                 bool     `json:"backchannel_logout_supported"`                     // OIDC Back-Channel Logout 1.0
+	BackchannelLogoutSessionSupported          bool     `json:"backchannel_logout_session_supported"`             // OIDC Back-Channel Logout 1.0
+	DPoPSigningAlgValuesSupported              []string `json:"dpop_signing_alg_values_supported,omitempty"`      // RFC 9449
+	AuthorizationResponseIssParameterSupported bool     `json:"authorization_response_iss_parameter_supported"`   // RFC 9207
+	ClientIdMetadataDocumentSupported          bool     `json:"client_id_metadata_document_supported"`            // draft-ietf-oauth-client-id-metadata-document
+	AuthorizationGrantProfilesSupported        []string `json:"authorization_grant_profiles_supported,omitempty"` // draft-ietf-oauth-identity-assertion-authz-grant
+}
+
+var (
+	ErrWebFingerInvalidResource = errors.New("invalid resource")
+	ErrWebFingerUserNotFound    = errors.New("user not found")
+)
+
+type WebFinger struct {
+	Subject    string             `json:"subject"`
+	Links      []WebFingerLink    `json:"links"`
+	Aliases    *[]string          `json:"aliases,omitempty"`
+	Properties *map[string]string `json:"properties,omitempty"`
+}
+
+type WebFingerLink struct {
+	Rel  string `json:"rel"`
+	Href string `json:"href"`
+}
+
+func isIpAddress(host string) bool {
+	// Attempt to split the host and port, ignoring the error
+	hostWithoutPort, _, err := net.SplitHostPort(host)
+	if err != nil {
+		// If an error occurs, it might be because there's no port
+		// In that case, use the original host string
+		hostWithoutPort = host
+	}
+
+	// Attempt to parse the host as an IP address (both IPv4 and IPv6)
+	ip := net.ParseIP(hostWithoutPort)
+	// if host is not nil is an IP address else is not an IP address
+	return ip != nil
+}
+
+func getOriginFromHostInternal(host string) (string, string) {
+	origin := conf.GetConfigString("origin")
+	if origin != "" {
+		return origin, origin
+	}
+
+	isDev := conf.GetConfigString("runmode") == "dev"
+	// "door.casdoor.com"
+	protocol := "https://"
+	if !strings.Contains(host, ".") {
+		// "localhost:8000" or "computer-name:80"
+		protocol = "http://"
+	} else if isIpAddress(host) {
+		// "192.168.0.10"
+		protocol = "http://"
+	}
+
+	basePath := conf.GetBasePath()
+	if host == "localhost:8000" && isDev {
+		return fmt.Sprintf("%s%s%s", protocol, "localhost:7001", basePath), fmt.Sprintf("%s%s%s", protocol, "localhost:8000", basePath)
+	} else {
+		return fmt.Sprintf("%s%s%s", protocol, host, basePath), fmt.Sprintf("%s%s%s", protocol, host, basePath)
+	}
+}
+
+func getOriginFromHost(host string) (string, string) {
+	originF, originB := getOriginFromHostInternal(host)
+
+	originFrontend := conf.GetConfigString("originFrontend")
+	if originFrontend != "" {
+		originF = originFrontend
+	}
+
+	return originF, originB
+}
+
+func GetOidcIssuer(host string) string {
+	_, originBackend := getOriginFromHost(host)
+	return originBackend
+}
+
+// GetOrganizationIssuer returns the issuer of an organization that works as its own tenant, e.g. "https://door.casdoor.com/orgs/casbin"
+func GetOrganizationIssuer(host string, organizationName string) string {
+	return fmt.Sprintf("%s/orgs/%s", GetOidcIssuer(host), url.PathEscape(organizationName))
+}
+
+// getOrganizationIssuerOrGlobal returns the issuer of an organization when it has its own, otherwise the global issuer
+func getOrganizationIssuerOrGlobal(host string, organization *Organization) string {
+	if organization.UseOrganizationIssuer {
+		return GetOrganizationIssuer(host, organization.Name)
+	}
+	return GetOidcIssuer(host)
+}
+
+// GetOidcIssuerByApplication returns the `iss` of the tokens of an application: the issuer of its organization when the
+// organization has its own issuer, otherwise the global issuer
+func GetOidcIssuerByApplication(host string, application *Application) (string, error) {
+	if application == nil || application.Organization == "" {
+		return GetOidcIssuer(host), nil
+	}
+
+	organization, err := getOrganization("admin", application.Organization)
+	if err != nil {
+		return "", err
+	}
+	if organization != nil && organization.UseOrganizationIssuer {
+		return GetOrganizationIssuer(host, organization.Name), nil
+	}
+	return GetOidcIssuer(host), nil
+}
+
+// getOrganizationEndpoints scopes the registration endpoint (DCR) and the authorization endpoint (URL client_ids) to an organization
+func getOrganizationEndpoints(registrationEndpoint string, authorizationEndpoint string, organizationName string) (string, string) {
+	registrationEndpoint = fmt.Sprintf("%s?organization=%s", registrationEndpoint, url.QueryEscape(organizationName))
+	// Tells URL client_ids which organization to be added to, as registrationEndpoint does for DCR
+	if organizationName != cimdOrganization && IsClientIdMetadataDocumentSupported(organizationName) {
+		authorizationEndpoint = fmt.Sprintf("%s?organization=%s", authorizationEndpoint, url.QueryEscape(organizationName))
+	}
+	return registrationEndpoint, authorizationEndpoint
+}
+
+func GetOidcDiscovery(host string, applicationName string) OidcDiscovery {
+	originFrontend, originBackend := getOriginFromHost(host)
+
+	// Issuer must match the `iss` claim in JWT tokens so that clients can validate tokens correctly
+	issuer := originBackend
+	jwksUri := fmt.Sprintf("%s/.well-known/jwks", originBackend)
+	if applicationName != "" {
+		// Application-specific endpoints (owner is always "admin")
+		jwksUri = fmt.Sprintf("%s/.well-known/%s/jwks", originBackend, applicationName)
+	}
+
+	// Default OIDC scopes
+	scopes := []string{"openid", "email", "profile", "address", "phone", "offline_access"}
+
+	registrationEndpoint := fmt.Sprintf("%s/api/oauth/register", originBackend)
+	authorizationEndpoint := fmt.Sprintf("%s/login/oauth/authorize", originFrontend)
+	cimdOrg := ""
+
+	// Merge application-specific custom scopes if application is provided
+	if applicationName != "" {
+		applicationId := util.GetId("admin", applicationName)
+		application, err := GetApplication(applicationId)
+		if err == nil && application != nil {
+			for _, scope := range application.Scopes {
+				// Add custom scope names to the scopes list
+				if scope.Name != "" {
+					scopes = append(scopes, scope.Name)
+				}
+			}
+
+			if application.Organization != "" {
+				registrationEndpoint, authorizationEndpoint = getOrganizationEndpoints(registrationEndpoint, authorizationEndpoint, application.Organization)
+				cimdOrg = application.Organization
+			}
+
+			applicationIssuer, err := GetOidcIssuerByApplication(host, application)
+			if err == nil {
+				issuer = applicationIssuer
+			}
+		}
+	}
+
+	// Examples:
+	// https://login.okta.com/.well-known/openid-configuration
+	// https://auth0.auth0.com/.well-known/openid-configuration
+	// https://accounts.google.com/.well-known/openid-configuration
+	// https://access.line.me/.well-known/openid-configuration
+	oidcDiscovery := OidcDiscovery{
+		Issuer:                                     issuer,
+		AuthorizationEndpoint:                      authorizationEndpoint,
+		TokenEndpoint:                              fmt.Sprintf("%s/api/login/oauth/access_token", originBackend),
+		TokenEndpointAuthMethodsSupported:          []string{"client_secret_basic", "client_secret_post", "private_key_jwt", "none"},
+		UserinfoEndpoint:                           fmt.Sprintf("%s/api/userinfo", originBackend),
+		DeviceAuthorizationEndpoint:                fmt.Sprintf("%s/api/device-auth", originBackend),
+		RegistrationEndpoint:                       registrationEndpoint,
+		JwksUri:                                    jwksUri,
+		IntrospectionEndpoint:                      fmt.Sprintf("%s/api/login/oauth/introspect", originBackend),
+		RevocationEndpoint:                         fmt.Sprintf("%s/api/login/oauth/revoke", originBackend),
+		ResponseTypesSupported:                     []string{"code", "token", "id_token", "code token", "code id_token", "token id_token", "code token id_token"},
+		ResponseModesSupported:                     []string{"query", "fragment", "form_post"},
+		GrantTypesSupported:                        []string{"authorization_code", "implicit", "password", "client_credentials", "refresh_token", "urn:ietf:params:oauth:grant-type:device_code", "urn:ietf:params:oauth:grant-type:jwt-bearer", "urn:ietf:params:oauth:grant-type:token-exchange", VerificationCodeGrantType, MobileOneClickGrantType},
+		SubjectTypesSupported:                      []string{"public"},
+		IdTokenSigningAlgValuesSupported:           []string{"RS256", "RS512", "ES256", "ES384", "ES512"},
+		ScopesSupported:                            scopes,
+		CodeChallengeMethodsSupported:              []string{"S256"},
+		ClaimsSupported:                            []string{"iss", "ver", "sub", "aud", "iat", "exp", "id", "type", "displayName", "avatar", "permanentAvatar", "email", "phone", "location", "affiliation", "title", "homepage", "bio", "tag", "region", "language", "score", "ranking", "isOnline", "isAdmin", "isForbidden", "signupApplication", "ldap"},
+		RequestParameterSupported:                  true,
+		RequestUriParameterSupported:               false,
+		RequestObjectSigningAlgValuesSupported:     RequestObjectSigningAlgs,
+		EndSessionEndpoint:                         fmt.Sprintf("%s/api/logout", originBackend),
+		BackchannelLogoutSupported:                 true,
+		BackchannelLogoutSessionSupported:          true,
+		DPoPSigningAlgValuesSupported:              DPoPSigningAlgs,
+		AuthorizationResponseIssParameterSupported: true,
+		ClientIdMetadataDocumentSupported:          IsClientIdMetadataDocumentSupported(cimdOrg),
+		AuthorizationGrantProfilesSupported:        []string{"urn:ietf:params:oauth:grant-profile:id-jag"},
+	}
+
+	if !edition.Has(edition.Commercial) {
+		oidcDiscovery.GrantTypesSupported = util.DeleteVal(oidcDiscovery.GrantTypesSupported, MobileOneClickGrantType)
+		oidcDiscovery.AuthorizationGrantProfilesSupported = nil
+	}
+	if edition.Has(edition.Enterprise) {
+		oidcDiscovery.IdTokenSigningAlgValuesSupported = append(oidcDiscovery.IdTokenSigningAlgValuesSupported, gm.Alg)
+	}
+
+	return oidcDiscovery
+}
+
+// GetOidcDiscoveryByOrganization returns the discovery document of an organization that has its own issuer, nil when
+// the organization doesn't exist or uses the global issuer
+func GetOidcDiscoveryByOrganization(host string, organizationName string) (*OidcDiscovery, error) {
+	organization, err := getOrganization("admin", organizationName)
+	if err != nil {
+		return nil, err
+	}
+	if organization == nil || !organization.UseOrganizationIssuer {
+		return nil, nil
+	}
+
+	oidcDiscovery := GetOidcDiscovery(host, "")
+	oidcDiscovery.Issuer = GetOrganizationIssuer(host, organization.Name)
+	oidcDiscovery.RegistrationEndpoint, oidcDiscovery.AuthorizationEndpoint = getOrganizationEndpoints(oidcDiscovery.RegistrationEndpoint, oidcDiscovery.AuthorizationEndpoint, organization.Name)
+	oidcDiscovery.ClientIdMetadataDocumentSupported = IsClientIdMetadataDocumentSupported(organization.Name)
+	return &oidcDiscovery, nil
+}
+
+func getJsonWebKeySetCerts(applicationName string) ([]*Cert, error) {
+	// Get certs - use application-specific cert if applicationName is provided
+	var certs []*Cert
+	var err error
+	if applicationName != "" {
+		// Try to get application-specific cert (owner is always "admin")
+		applicationId := util.GetId("admin", applicationName)
+		application, err := GetApplication(applicationId)
+		if err == nil && application != nil {
+			cert, err := getCertByApplication(application)
+			if err == nil && cert != nil {
+				certs = []*Cert{cert}
+			}
+		}
+	}
+
+	// Fallback to all certs (public keys only) if no application-specific cert found
+	if len(certs) == 0 {
+		certs, err = GetCerts("")
+		if err != nil {
+			return nil, err
+		}
+	}
+	return certs, nil
+}
+
+func GetJsonWebKeySet(applicationName string) (jose.JSONWebKeySet, error) {
+	jwks := jose.JSONWebKeySet{}
+	certs, err := getJsonWebKeySetCerts(applicationName)
+	if err != nil {
+		return jwks, err
+	}
+
+	// follows the protocol rfc 7517(draft)
+	// link here: https://self-issued.info/docs/draft-ietf-jose-json-web-key.html
+	// or https://datatracker.ietf.org/doc/html/draft-ietf-jose-json-web-key
+	for _, cert := range certs {
+		if jwk := getJsonWebKey(cert); jwk != nil {
+			jwks.Keys = append(jwks.Keys, *jwk)
+		}
+		// the key before the last rotation stays published, for the tokens it signed
+		if jwk := getPreviousJsonWebKey(cert); jwk != nil {
+			jwks.Keys = append(jwks.Keys, *jwk)
+		}
+	}
+
+	return jwks, nil
+}
+
+// GetJsonWebKeySetWithSm2 is the JWKS with the keys of SM2 certs too, which go-jose cannot encode
+func GetJsonWebKeySetWithSm2(applicationName string) (interface{}, error) {
+	jwks, err := GetJsonWebKeySet(applicationName)
+	if err != nil {
+		return nil, err
+	}
+	certs, err := getJsonWebKeySetCerts(applicationName)
+	if err != nil {
+		return nil, err
+	}
+
+	keys := []interface{}{}
+	for i := range jwks.Keys {
+		keys = append(keys, jwks.Keys[i])
+	}
+	for _, cert := range certs {
+		if cert.Type != "x509" || cert.CryptoAlgorithm != gm.Alg {
+			continue
+		}
+		if jwk, err := gm.GetJsonWebKey(cert.Certificate, cert.GetKeyId()); err == nil {
+			keys = append(keys, jwk)
+		}
+		if cert.PreviousCertificate != "" && cert.PreviousKeyId != "" && cert.PreviousKeyId != cert.GetKeyId() {
+			if jwk, err := gm.GetJsonWebKey(cert.PreviousCertificate, cert.PreviousKeyId); err == nil {
+				keys = append(keys, jwk)
+			}
+		}
+	}
+	return map[string]interface{}{"keys": keys}, nil
+}
+
+func getJsonWebKey(cert *Cert) *jose.JSONWebKey {
+	if cert.Type != "x509" {
+		return nil
+	}
+	return newJsonWebKey(cert, cert.Certificate, cert.GetKeyId())
+}
+
+func newJsonWebKey(cert *Cert, certificate string, keyId string) *jose.JSONWebKey {
+	if certificate == "" {
+		return nil
+	}
+
+	certDerBlock, _ := pem.Decode([]byte(certificate))
+	if certDerBlock == nil {
+		return nil
+	}
+
+	x509Cert, err := x509.ParseCertificate(certDerBlock.Bytes)
+	if err != nil {
+		return nil
+	}
+
+	return &jose.JSONWebKey{
+		Key:          x509Cert.PublicKey,
+		Certificates: []*x509.Certificate{x509Cert},
+		KeyID:        keyId,
+		Algorithm:    cert.CryptoAlgorithm,
+		Use:          "sig",
+	}
+}
+
+func GetWebFinger(resource string, rels []string, host string, applicationName string) (WebFinger, error) {
+	wf := WebFinger{}
+
+	resourceSplit := strings.Split(resource, ":")
+
+	if len(resourceSplit) != 2 {
+		return wf, ErrWebFingerInvalidResource
+	}
+
+	resourceType := resourceSplit[0]
+	resourceValue := resourceSplit[1]
+
+	oidcDiscovery := GetOidcDiscovery(host, applicationName)
+
+	switch resourceType {
+	case "acct":
+		user, err := GetUserByEmailOnly(resourceValue)
+		if err != nil {
+			return wf, err
+		}
+
+		if user == nil {
+			return wf, ErrWebFingerUserNotFound
+		}
+
+		wf.Subject = resource
+
+		for _, rel := range rels {
+			if rel == "http://openid.net/specs/connect/1.0/issuer" {
+				wf.Links = append(wf.Links, WebFingerLink{
+					Rel:  "http://openid.net/specs/connect/1.0/issuer",
+					Href: oidcDiscovery.Issuer,
+				})
+			}
+		}
+	}
+
+	return wf, nil
+}
+
+func GetDeviceAuthResponse(deviceCode string, userCode string, cancelToken string, host string, expiresIn int) DeviceAuthResponse {
+	originFrontend, _ := getOriginFromHost(host)
+
+	return DeviceAuthResponse{
+		DeviceCode:      deviceCode,
+		UserCode:        userCode,
+		VerificationUri: fmt.Sprintf("%s/login/oauth/device/%s?cancelToken=%s", originFrontend, userCode, url.QueryEscape(cancelToken)),
+		ExpiresIn:       expiresIn,
+		Interval:        DeviceAuthInterval,
+	}
+}

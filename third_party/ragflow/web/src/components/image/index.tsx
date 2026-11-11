@@ -1,0 +1,326 @@
+/*
+ *  Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+import { Authorization } from '@/constants/authorization';
+import { restAPIv1 } from '@/utils/api';
+import { getAuthorization } from '@/utils/authorization-util';
+import classNames from 'classnames';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+
+interface IImage extends React.ImgHTMLAttributes<HTMLImageElement> {
+  id: string;
+  documentId?: string;
+  t?: string | number;
+  label?: string;
+  previewButton?: React.ReactNode;
+}
+
+type ImageCacheItem = {
+  count: number;
+  // The URL the bytes belong to, without the cache-busting `_t` query, so an
+  // entry can be found again no matter which `_t` fetched it.
+  baseUrl: string;
+  objectUrl?: string;
+  promise?: Promise<string>;
+  timer?: ReturnType<typeof setTimeout>;
+};
+
+const imageCache = new Map<string, ImageCacheItem>();
+
+export const buildDocumentImageUrl = (
+  id: string,
+  documentId?: string,
+  t?: string | number,
+) => {
+  const params = new URLSearchParams();
+
+  if (t) {
+    params.set('_t', String(t));
+  }
+
+  const query = params.toString();
+  const path = documentId
+    ? `/documents/${encodeURIComponent(documentId)}/images/${encodeURIComponent(id)}`
+    : `/documents/images/${encodeURIComponent(id)}`;
+  return `${restAPIv1}${path}${query ? `?${query}` : ''}`;
+};
+
+// Drop the cached bytes of one document image. A chunk keeps its img_id when
+// its image is updated in place, so mounted <Image>s would otherwise keep
+// rendering the previously fetched picture.
+export const evictDocumentImage = (id: string, documentId?: string) => {
+  const baseUrl = buildDocumentImageUrl(id, documentId);
+
+  imageCache.forEach((item, cacheKey) => {
+    if (item.baseUrl !== baseUrl) {
+      return;
+    }
+    if (item.timer) {
+      clearTimeout(item.timer);
+    }
+    if (item.objectUrl) {
+      URL.revokeObjectURL(item.objectUrl);
+    }
+    imageCache.delete(cacheKey);
+  });
+};
+
+const fetchDocumentImage = (url: string, authorization: string) => {
+  const cacheKey = `${authorization}:${url}`;
+  let item = imageCache.get(cacheKey);
+
+  if (!item) {
+    item = { count: 0, baseUrl: url.split('?')[0] };
+    imageCache.set(cacheKey, item);
+  }
+  if (item.timer) {
+    clearTimeout(item.timer);
+    item.timer = undefined;
+  }
+  item.count += 1;
+
+  if (!item.promise) {
+    item.promise = fetch(url, { headers: { [Authorization]: authorization } })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(response.statusText);
+        }
+        return response.blob();
+      })
+      .then((blob) => {
+        item.objectUrl = URL.createObjectURL(blob);
+        return item.objectUrl;
+      })
+      .catch((error) => {
+        // A re-fetch may have installed a newer entry under this key.
+        if (imageCache.get(cacheKey) === item) {
+          imageCache.delete(cacheKey);
+        }
+        throw error;
+      });
+  }
+
+  return {
+    promise: item.promise,
+    release: () => {
+      item.count -= 1;
+      if (item.count <= 0) {
+        item.timer = setTimeout(() => {
+          if (item.count <= 0) {
+            if (item.objectUrl) {
+              URL.revokeObjectURL(item.objectUrl);
+            }
+            // Eviction or a re-fetch may have replaced this entry meanwhile.
+            if (imageCache.get(cacheKey) === item) {
+              imageCache.delete(cacheKey);
+            }
+          }
+        }, 30000);
+      }
+    },
+  };
+};
+
+// Check if a URL requires authentication (internal API URLs)
+// Only attach Authorization headers to same-origin requests to prevent token leakage
+const isAuthRequiredUrl = (url: string): boolean => {
+  try {
+    const parsedUrl = new URL(url, window.location.origin);
+    if (parsedUrl.origin !== window.location.origin) {
+      return false;
+    }
+    return (
+      parsedUrl.pathname.startsWith('/api/v1/') ||
+      parsedUrl.pathname.includes('/documents/images/')
+    );
+  } catch {
+    return false;
+  }
+};
+
+export const useDocumentImageUrl = (
+  id: string,
+  documentId?: string,
+  t?: string | number,
+) => {
+  const directUrl = useMemo(
+    () => buildDocumentImageUrl(id, documentId, t),
+    [documentId, id, t],
+  );
+  const [imageUrl, setImageUrl] = useState<string>('');
+
+  useEffect(() => {
+    // For non-API URLs (e.g., base64, external URLs), use directly
+    if (!isAuthRequiredUrl(directUrl)) {
+      setImageUrl(directUrl);
+      return;
+    }
+
+    // For API URLs that require authentication, always fetch with auth headers
+    const authorization = getAuthorization();
+    let ignore = false;
+    setImageUrl('');
+    const { promise, release } = fetchDocumentImage(directUrl, authorization);
+    promise
+      .then((url) => {
+        if (ignore) {
+          return;
+        }
+        setImageUrl(url);
+      })
+      .catch(() => {
+        if (!ignore) {
+          setImageUrl('');
+        }
+      });
+
+    return () => {
+      ignore = true;
+      release();
+    };
+  }, [directUrl]);
+
+  return imageUrl;
+};
+
+export type AuthenticatedImageUrlStatus = 'loading' | 'ready' | 'error';
+
+/**
+ * Hook to convert any authenticated URL to a blob URL for use in <img> tags.
+ * Use this for thumbnail URLs or any other API URLs that require authentication.
+ * The status distinguishes an in-flight fetch from a failed one, which the
+ * empty src alone cannot express.
+ */
+export const useAuthenticatedImageUrl = (
+  url: string | undefined | null,
+): { src: string; status: AuthenticatedImageUrlStatus } => {
+  const [state, setState] = useState<{
+    src: string;
+    status: AuthenticatedImageUrlStatus;
+  }>({ src: '', status: 'loading' });
+
+  useEffect(() => {
+    if (!url || !isAuthRequiredUrl(url)) {
+      setState({ src: url || '', status: 'ready' });
+      return;
+    }
+
+    const authorization = getAuthorization();
+    let cancelled = false;
+    setState({ src: '', status: 'loading' });
+
+    const { promise, release } = fetchDocumentImage(url, authorization);
+    promise
+      .then((blobUrl) => {
+        if (!cancelled) {
+          setState({ src: blobUrl, status: 'ready' });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setState({ src: '', status: 'error' });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      release();
+    };
+  }, [url]);
+
+  return state;
+};
+
+/**
+ * Component that renders an <img> tag with proper authentication for API URLs.
+ * Use this instead of <img src={apiUrl}> when the URL requires authentication.
+ */
+export const AuthenticatedImg = ({
+  src,
+  alt,
+  className,
+  fallback,
+  ...props
+}: React.ImgHTMLAttributes<HTMLImageElement> & {
+  fallback?: React.ReactNode;
+}) => {
+  const { src: authenticatedSrc } = useAuthenticatedImageUrl(src);
+
+  if (!authenticatedSrc) return fallback ?? null;
+
+  return (
+    <img src={authenticatedSrc} alt={alt} className={className} {...props} />
+  );
+};
+
+const Image = React.forwardRef<HTMLImageElement, IImage>(function Image(
+  { id, documentId, t, label, previewButton, className, ...props },
+  ref,
+) {
+  const src = useDocumentImageUrl(id, documentId, t);
+  const imageElement = (
+    <img
+      {...props}
+      ref={ref}
+      src={src || undefined}
+      className={classNames('max-w-[45vw] max-h-[40wh] block', className)}
+    />
+  );
+
+  if (!label) {
+    return imageElement;
+  }
+
+  return (
+    <div className="relative inline-block w-full">
+      {imageElement}
+      {previewButton}
+      <div className="absolute bottom-2 right-2 bg-accent-primary text-white px-2 py-0.5 rounded-xl text-xs font-normal backdrop-blur-sm">
+        {label}
+      </div>
+    </div>
+  );
+});
+
+export default Image;
+
+export const ImageWithPopover = ({
+  id,
+  documentId,
+}: {
+  id: string;
+  documentId?: string;
+}) => {
+  return (
+    <Popover>
+      <PopoverTrigger>
+        <Image
+          id={id}
+          documentId={documentId}
+          className="max-h-[100px] inline-block"
+        ></Image>
+      </PopoverTrigger>
+      <PopoverContent>
+        <Image
+          id={id}
+          documentId={documentId}
+          className="max-w-[100px] object-contain"
+        ></Image>
+      </PopoverContent>
+    </Popover>
+  );
+};

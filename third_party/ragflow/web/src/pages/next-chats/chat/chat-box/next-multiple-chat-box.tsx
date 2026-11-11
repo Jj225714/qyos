@@ -1,0 +1,414 @@
+import { LargeModelFormFieldWithoutFilter } from '@/components/large-model-form-field';
+import { LlmSettingSchema } from '@/components/llm-setting-items/next';
+import {
+  NextMessageInput,
+  NextMessageInputOnPressEnterParameter,
+} from '@/components/message-input/next';
+import MessageItem from '@/components/message-item';
+import PdfSheet from '@/components/pdf-drawer';
+import { useClickDrawer } from '@/components/pdf-drawer/hooks';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Form } from '@/components/ui/form';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
+import { VirtualMessageList } from '@/components/virtual-message-list';
+import { MessageType } from '@/constants/chat';
+import { useHandleMessageInputChange } from '@/hooks/logic-hooks';
+import {
+  useFetchChat,
+  useGetChatSearchParams,
+  useUpdateChat,
+} from '@/hooks/use-chat-request';
+import { useFindLlmByUuid } from '@/hooks/use-llm-request';
+import { useFetchUserInfo } from '@/hooks/use-user-setting-request';
+import { IClientConversation } from '@/interfaces/database/chat';
+import {
+  deriveModelPreset,
+  removeUselessFieldsFromValues,
+  setLLMSettingEnabledValues,
+} from '@/utils/form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { t } from 'i18next';
+import { isEmpty, omit, trim } from 'lodash';
+import { ListCheck, Plus, Trash2 } from 'lucide-react';
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
+import { useForm, useWatch } from 'react-hook-form';
+import { useParams } from 'react-router';
+import { z } from 'zod';
+import {
+  useGetSendButtonDisabled,
+  useSendButtonDisabled,
+} from '../../hooks/use-button-disabled';
+import { useCreateConversationBeforeUploadDocument } from '../../hooks/use-create-conversation';
+import {
+  HandlePressEnterType,
+  useSendSingleMessage,
+  UseSendSingleMessageParameter,
+} from '../../hooks/use-send-single-message';
+import { useUploadFile } from '../../hooks/use-upload-file';
+import { EmptyReference } from '../../utils';
+import { useAddChatBox } from '../use-add-box';
+import { useShowInternet } from '../use-show-internet';
+import { useMessageReferences } from '../../hooks/use-message-references';
+
+type MultipleChatBoxProps = {
+  controller: AbortController;
+  chatBoxIds: string[];
+  stopOutputMessage(): void;
+  conversation: IClientConversation;
+} & Pick<
+  ReturnType<typeof useAddChatBox>,
+  'removeChatBox' | 'addChatBox' | 'chatBoxIds'
+>;
+
+type ChatCardProps = {
+  id: string;
+  idx: number;
+  conversation: IClientConversation;
+  isAnyBoxLoading: boolean;
+  setLoading(id: string, loading: boolean): void;
+} & Pick<
+  MultipleChatBoxProps,
+  'controller' | 'removeChatBox' | 'addChatBox' | 'chatBoxIds'
+> &
+  Pick<ReturnType<typeof useClickDrawer>, 'clickDocumentButton'> &
+  UseSendSingleMessageParameter;
+
+const ChatCard = forwardRef(function ChatCard(
+  {
+    controller,
+    removeChatBox,
+    id,
+    idx,
+    addChatBox,
+    chatBoxIds,
+    clickDocumentButton,
+    value,
+    setValue,
+    files,
+    clearFiles,
+    setLoading,
+    isAnyBoxLoading,
+  }: ChatCardProps,
+  ref,
+) {
+  const { id: dialogId } = useParams();
+  const { updateChat } = useUpdateChat();
+
+  const {
+    derivedMessages,
+    handlePressEnter,
+    sendLoading,
+    messageContainerRef,
+    virtualizer,
+  } = useSendSingleMessage({
+    controller,
+    value,
+    setValue,
+    files,
+    clearFiles,
+  });
+
+  const messageReferences = useMessageReferences(derivedMessages);
+
+  const FormSchema = z.object(LlmSettingSchema);
+
+  const form = useForm<z.infer<typeof FormSchema>>({
+    resolver: zodResolver(FormSchema),
+    defaultValues: {
+      llm_id: '',
+    },
+  });
+
+  const llmId = useWatch({ control: form.control, name: 'llm_id' });
+
+  const { data: userInfo } = useFetchUserInfo();
+  const { data: currentDialog } = useFetchChat();
+  const findLlmByUuid = useFindLlmByUuid();
+
+  // Each card must keep its own independently selected config after the initial
+  // sync. Without this guard, clicking "Apply" in one card updates the dialog
+  // (which invalidates [FetchChat] and refetches currentDialog), and the
+  // changed currentDialog would then overwrite every other card's values via
+  // this effect. Sync only when dialogId changes (initial load or conversation
+  // switch), not when currentDialog changes due to Apply.
+  const syncedDialogIdRef = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (syncedDialogIdRef.current !== dialogId && currentDialog?.llm_id) {
+      // The preset name is not part of the stored llm_setting; derive it from
+      // the stored values so the freedom select reflects them.
+      form.reset({
+        ...currentDialog.llm_setting,
+        ...setLLMSettingEnabledValues(currentDialog.llm_setting),
+        parameter: deriveModelPreset(currentDialog.llm_setting),
+        llm_id: currentDialog.llm_id,
+      });
+      syncedDialogIdRef.current = dialogId;
+    }
+  }, [currentDialog, dialogId, form]);
+
+  const isLatestChat = idx === chatBoxIds.length - 1;
+
+  const handleRemoveChatBox = useCallback(() => {
+    removeChatBox(id);
+  }, [id, removeChatBox]);
+
+  const handleApplyConfig = useCallback(() => {
+    const values = form.getValues();
+    const llmId = values.llm_id;
+    const llmSetting = removeUselessFieldsFromValues(values, '');
+    // Replace the full settings object so disabled fields are removed instead
+    // of surviving a PATCH merge with the previously saved values.
+    updateChat({
+      chatId: dialogId!,
+      params: {
+        llm_id: llmId,
+        tenant_llm_id: llmId,
+        llm_setting: {
+          ...omit(llmSetting, 'llm_id'),
+          model_type: findLlmByUuid(llmId)?.model_type || 'chat',
+        },
+      },
+    });
+  }, [dialogId, form, updateChat, findLlmByUuid]);
+
+  useImperativeHandle(ref, (): HandlePressEnterType => (params) => {
+    return handlePressEnter({
+      ...params,
+      ...removeUselessFieldsFromValues(form.getValues(), ''),
+      storeHistoryMessages: false,
+      omitSessionId: true,
+    });
+  });
+
+  useEffect(() => {
+    setLoading(id, sendLoading);
+  }, [id, sendLoading, setLoading]);
+
+  return (
+    <Card
+      className="bg-transparent border flex-1 flex flex-col"
+      data-testid="chat-detail-multimodel-card"
+      data-card-index={idx}
+      data-card-key={id}
+    >
+      <CardHeader className="border-b-0.5 px-5 py-3">
+        <CardTitle className="flex justify-between items-center">
+          <div className="flex items-center gap-3">
+            <span className="text-base">{idx + 1}</span>
+            <Form {...form}>
+              <LargeModelFormFieldWithoutFilter
+                triggerTestId="chat-detail-multimodel-card-model-select"
+                optionTestIdPrefix="chat-detail-llm-option-"
+                ownerTenantId={currentDialog?.tenant_id}
+              ></LargeModelFormFieldWithoutFilter>
+            </Form>
+          </div>
+          <div className="space-x-2">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  disabled={isEmpty(llmId) || isAnyBoxLoading}
+                  onClick={handleApplyConfig}
+                  data-testid="chat-detail-multimodel-card-apply"
+                  data-card-index={idx}
+                >
+                  <ListCheck />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>{t('chat.applyModelConfigs')}</p>
+              </TooltipContent>
+            </Tooltip>
+            {chatBoxIds.length > 1 && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                disabled={isAnyBoxLoading}
+                onClick={handleRemoveChatBox}
+                data-testid="chat-detail-multimodel-card-remove"
+                data-card-index={idx}
+              >
+                <Trash2 />
+              </Button>
+            )}
+            {isLatestChat && idx < 2 && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                disabled={isAnyBoxLoading}
+                onClick={addChatBox}
+                data-testid="chat-detail-multimodel-add-card"
+              >
+                <Plus />
+              </Button>
+            )}
+          </div>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex-1 min-h-0">
+        <div ref={messageContainerRef} className="h-full overflow-auto">
+          <VirtualMessageList
+            className="w-full"
+            items={derivedMessages ?? []}
+            virtualizer={virtualizer}
+            renderItem={(message, i) => (
+              <MessageItem
+                loading={
+                  message.role === MessageType.Assistant &&
+                  sendLoading &&
+                  derivedMessages.length - 1 === i
+                }
+                item={message}
+                nickname={userInfo.nickname}
+                avatar={userInfo.avatar}
+                avatarDialog={currentDialog.icon}
+                reference={messageReferences.get(message) ?? EmptyReference}
+                // clickDocumentButton={clickDocumentButton}
+                index={i}
+                isLast={i === derivedMessages.length - 1}
+                sendLoading={sendLoading}
+                clickDocumentButton={clickDocumentButton}
+                showLikeButton={false}
+              />
+            )}
+          />
+        </div>
+      </CardContent>
+    </Card>
+  );
+});
+
+export function MultipleChatBox({
+  controller,
+  chatBoxIds,
+  removeChatBox,
+  addChatBox,
+  stopOutputMessage,
+  conversation,
+}: MultipleChatBoxProps) {
+  const { createConversationBeforeUploadDocument } =
+    useCreateConversationBeforeUploadDocument();
+  const { conversationId } = useGetChatSearchParams();
+  const disabled = useGetSendButtonDisabled();
+  const { visible, hideModal, documentId, selectedChunk, clickDocumentButton } =
+    useClickDrawer();
+
+  const [chatBoxLoading, setChatBoxLoading] = useState<Map<string, boolean>>(
+    new Map(),
+  );
+
+  const setLoading = useCallback((id: string, loading: boolean) => {
+    setChatBoxLoading((prev) => {
+      const newMap = new Map(prev);
+      newMap.set(id, loading);
+      return newMap;
+    });
+  }, []);
+
+  const allChatBoxLoading = [...chatBoxLoading.values()];
+  const isAnyBoxLoading = allChatBoxLoading.some((loading) => loading);
+
+  const showInternet = useShowInternet();
+
+  const { handleInputChange, value, setValue } = useHandleMessageInputChange();
+  const { handleUploadFile, isUploading, files, clearFiles, removeFile } =
+    useUploadFile();
+  const sendDisabled = useSendButtonDisabled(value);
+
+  const boxesRef = useRef<Record<string, HandlePressEnterType>>({});
+
+  const setFormRef = (id: string) => (ref: HandlePressEnterType) => {
+    boxesRef.current[id] = ref;
+  };
+
+  const handlePressEnter = useCallback(
+    async ({
+      enableInternet,
+      enableThinking,
+    }: NextMessageInputOnPressEnterParameter) => {
+      if (trim(value) === '') return;
+
+      Object.values(boxesRef.current).forEach((box) => {
+        box?.({
+          enableInternet,
+          enableThinking,
+        });
+      });
+    },
+    [value],
+  );
+
+  return (
+    <section className="flex flex-1 min-h-0 flex-col px-5">
+      <div
+        className="flex gap-4 flex-1 px-5 pb-14 min-h-0"
+        data-testid="chat-detail-multimodel-grid"
+      >
+        {chatBoxIds.map((id, idx) => (
+          <ChatCard
+            key={id}
+            idx={idx}
+            controller={controller}
+            id={id}
+            chatBoxIds={chatBoxIds}
+            removeChatBox={removeChatBox}
+            addChatBox={addChatBox}
+            ref={setFormRef(id)}
+            clickDocumentButton={clickDocumentButton}
+            conversation={conversation}
+            value={value}
+            files={files}
+            setValue={setValue}
+            clearFiles={clearFiles}
+            setLoading={setLoading}
+            isAnyBoxLoading={isAnyBoxLoading}
+          ></ChatCard>
+        ))}
+      </div>
+      <div className="px-[20%]">
+        <NextMessageInput
+          disabled={disabled}
+          sendDisabled={sendDisabled}
+          sendLoading={isAnyBoxLoading}
+          value={value}
+          resize="vertical"
+          onInputChange={handleInputChange}
+          onPressEnter={handlePressEnter}
+          conversationId={conversationId}
+          createConversationBeforeUploadDocument={
+            createConversationBeforeUploadDocument
+          }
+          stopOutputMessage={stopOutputMessage}
+          onUpload={handleUploadFile}
+          showReasoning
+          showInternet={showInternet}
+          removeFile={removeFile}
+          isUploading={isUploading}
+        />
+      </div>
+      {visible && (
+        <PdfSheet
+          visible={visible}
+          hideModal={hideModal}
+          documentId={documentId}
+          chunk={selectedChunk}
+        ></PdfSheet>
+      )}
+    </section>
+  );
+}

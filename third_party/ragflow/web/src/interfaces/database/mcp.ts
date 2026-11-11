@@ -1,0 +1,59 @@
+export interface IMcpServer {
+  headers?: Record<string, string>;
+  create_date: string;
+  description: null;
+  id: string;
+  name: string;
+  server_type: string;
+  tenant_id: string;
+  update_date: string;
+  url: string;
+  variables: Record<string, any> & { tools?: IMCPToolObject };
+  operator_permission: number;
+  nickname?: string;
+}
+
+export type IMCPToolObject = Record<string, Omit<IMCPTool, 'name'>>;
+
+export type IMCPToolRecord = Record<string, IMCPTool>;
+
+export interface IMcpServerListResponse {
+  mcp_servers: IMcpServer[];
+  total: number;
+}
+
+export interface IMCPTool {
+  annotations: null;
+  description: string;
+  enabled: boolean;
+  inputSchema: InputSchema;
+  name: string;
+}
+
+interface InputSchema {
+  properties: Properties;
+  required: string[];
+  title: string;
+  type: string;
+}
+
+interface Properties {
+  symbol: ISymbol;
+}
+
+interface ISymbol {
+  title: string;
+  type: string;
+}
+
+export interface IExportedMcpServers {
+  mcpServers: Record<string, IExportedMcpServer>;
+}
+
+export interface IExportedMcpServer {
+  authorization_token: string;
+  name: string;
+  tool_configuration: Record<string, any>;
+  type: string;
+  url: string;
+}

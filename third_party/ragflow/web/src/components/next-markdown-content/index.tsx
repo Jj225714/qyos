@@ -1,0 +1,568 @@
+/*
+ *  Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+import Image, { AuthenticatedImg } from '@/components/image';
+import SvgIcon from '@/components/svg-icon';
+import { SafeImg } from '@/components/safe-img';
+import {
+  MarkdownRemarkPlugins,
+  MarkdownRemarkPluginsLite,
+} from '@/constants/markdown-remark-plugins';
+import { IReferenceChunk, IReferenceObject } from '@/interfaces/database/chat';
+import { getExtension } from '@/utils/document-util';
+import { supportsSourceLocate } from '@/utils/source-locate';
+import { downloadFileFromBlob } from '@/utils/file-util';
+import request from '@/utils/request';
+import DOMPurify from 'dompurify';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import Markdown, { defaultUrlTransform } from 'react-markdown';
+import SyntaxHighlighter from 'react-syntax-highlighter';
+import rehypeKatex from 'rehype-katex';
+import rehypeRaw from 'rehype-raw';
+import { RehypeSanitizeAssistantMarkdown } from '@/constants/markdown-rehype-plugins';
+import { visitParents } from 'unist-util-visit-parents';
+
+import { useTranslation } from 'react-i18next';
+
+import 'katex/dist/katex.min.css'; // `rehype-katex` does not import the CSS for you
+
+import {
+  buildCitationDisplayMap,
+  currentReg,
+  decodeAngleBracketEntities,
+  escapeUnmatchedAngleBrackets,
+  parseCitationIndex,
+  preprocessLaTeX,
+  replaceRetrievingToSection,
+  replaceTextByOldReg,
+  replaceThinkToSection,
+  resolveCitationChunk,
+  unescapeAngleBrackets,
+} from '@/utils/chat';
+import {
+  citationWholeMarkerReg,
+  type CitationKey,
+} from '@/utils/citation-utils';
+import { getDirAttribute } from '@/utils/text-direction';
+import * as HoverCardPrimitive from '@radix-ui/react-hover-card';
+
+import { useFetchDocumentThumbnailsByIds } from '@/hooks/use-document-request';
+import { useLoadingPause } from '@/hooks/use-loading-pause';
+import { cn } from '@/lib/utils';
+import classNames from 'classnames';
+import { omit } from 'lodash';
+import pipe from 'lodash/fp/pipe';
+import reactStringReplace from 'react-string-replace';
+import { LoadingDots } from '../loading-dots';
+import { Button } from '../ui/button';
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from '../ui/hover-card';
+import message from '../ui/message';
+import styles from './index.module.less';
+
+const getChunkKey = (match: string) => parseCitationIndex(match);
+
+const isArtifactUrl = (url?: string) =>
+  Boolean(url && url.includes('/api/v1/documents/artifact/'));
+
+const fetchArtifactResponse = (url: string) =>
+  request(url, {
+    method: 'GET',
+    responseType: 'blob',
+  });
+
+const fetchArtifactBlob = async (url: string): Promise<Blob> =>
+  (await fetchArtifactResponse(url)).data as Blob;
+
+const getArtifactName = (url?: string, fallback?: string) =>
+  fallback || url?.split('/').pop()?.split('?')[0] || 'artifact';
+
+/** Downloads attachment responses and previews other artifact blobs. */
+function ArtifactLink({
+  href,
+  className,
+  children,
+}: {
+  href: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const handleClick = useCallback(
+    async (e: React.MouseEvent<HTMLAnchorElement>) => {
+      e.preventDefault();
+      try {
+        const response = await fetchArtifactResponse(href);
+        const blob = response.data as Blob;
+        const contentDisposition = response.response.headers.get(
+          'content-disposition',
+        );
+        if (
+          typeof contentDisposition === 'string' &&
+          /^\s*attachment(?:;|$)/i.test(contentDisposition)
+        ) {
+          downloadFileFromBlob(blob, getArtifactName(href));
+          return;
+        }
+
+        const objectUrl = URL.createObjectURL(blob);
+        window.open(objectUrl, '_blank', 'noopener,noreferrer');
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60 * 1000);
+      } catch {
+        message.error('Failed to open artifact');
+      }
+    },
+    [href],
+  );
+
+  return (
+    <a href={href} className={className} onClick={handleClick}>
+      {children}
+    </a>
+  );
+}
+
+function ArtifactImage({
+  src,
+  alt,
+  downloadLabel,
+}: {
+  src: string;
+  alt?: string;
+  downloadLabel: string;
+}) {
+  const [imageSrc, setImageSrc] = useState('');
+
+  useEffect(() => {
+    let objectUrl = '';
+    let active = true;
+
+    const load = async () => {
+      try {
+        const blob = await fetchArtifactBlob(src);
+        objectUrl = URL.createObjectURL(blob);
+        if (active) {
+          setImageSrc(objectUrl);
+        }
+      } catch {
+        message.error('Failed to load artifact image');
+      }
+    };
+
+    load();
+
+    return () => {
+      active = false;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [alt, src]);
+
+  const handleDownload = useCallback(async () => {
+    try {
+      const blob = await fetchArtifactBlob(src);
+      downloadFileFromBlob(blob, getArtifactName(src, alt));
+    } catch {
+      message.error('Failed to download artifact');
+    }
+  }, [alt, src]);
+
+  return (
+    <span className={styles.artifactImageWrapper}>
+      {imageSrc ? (
+        <img src={imageSrc} alt={alt || ''} className={styles.artifactImage} />
+      ) : (
+        <span className={styles.artifactImage} />
+      )}
+      <button
+        type="button"
+        className={styles.artifactDownload}
+        onClick={handleDownload}
+      >
+        {downloadLabel}
+      </button>
+    </span>
+  );
+}
+// TODO: The display of the table is inconsistent with the display previously placed in the MessageItem.
+function MarkdownContent({
+  reference,
+  clickDocumentButton,
+  content,
+  loading,
+  disableMath = false,
+}: {
+  content: string;
+  loading: boolean;
+  reference?: IReferenceObject;
+  clickDocumentButton?: (documentId: string, chunk: IReferenceChunk) => void;
+  /**
+   * When true, disables LaTeX math rendering (remark-math + rehype-katex).
+   * Use this for user-generated content where `$` should be treated as literal text.
+   */
+  disableMath?: boolean;
+}) {
+  const { t } = useTranslation();
+  const { setDocumentIds, data: fileThumbnails } =
+    useFetchDocumentThumbnailsByIds();
+  const contentWithCursor = useMemo(() => {
+    // Escape standalone < and > outside matched <...> tags
+    // so DOMPurify doesn't strip them as HTML.
+    const safeContent = escapeUnmatchedAngleBrackets(content);
+
+    let text = DOMPurify.sanitize(safeContent, {
+      ADD_TAGS: ['think', 'section', 'details', 'summary', 'retrieving'],
+      ADD_ATTR: ['class'],
+    });
+    // let text = content;
+    if (text === '') {
+      text = t('chat.searching');
+    }
+    const nextText = replaceTextByOldReg(text);
+    const thinkSummary = loading
+      ? `${t('chat.thinking')}...`
+      : t('chat.thought');
+    return unescapeAngleBrackets(
+      pipe(
+        (value: string) => replaceThinkToSection(value, thinkSummary),
+        replaceRetrievingToSection,
+        preprocessLaTeX,
+        // Entity decoding can expose a line-leading > after the first escape.
+        escapeUnmatchedAngleBrackets,
+      )(nextText),
+    );
+  }, [content, loading, t]);
+
+  // Scope the display numbering to the whole message: each text node only
+  // sees its own markers, so a per-node map restarts at 0 every time and
+  // every distinct [ID:xxx] in a long answer renders as [1]. Building once
+  // from the rendered source (which keeps [n]/[ID:xxx] markers through the
+  // sanitize/latex/section pipeline) makes the numbers unique across the
+  // message while the tooltip still resolves chunks by the marker itself.
+  const citationDisplayMap = useMemo(
+    () => buildCitationDisplayMap(contentWithCursor),
+    [contentWithCursor],
+  );
+
+  useEffect(() => {
+    const docAggs = reference?.doc_aggs;
+    setDocumentIds(Array.isArray(docAggs) ? docAggs.map((x) => x.doc_id) : []);
+  }, [reference, setDocumentIds]);
+
+  const handleDocumentButtonClick = useCallback(
+    (
+      documentId: string,
+      chunk: IReferenceChunk,
+      fileExtension: string,
+      documentUrl?: string,
+    ) =>
+      () => {
+        if (supportsSourceLocate(fileExtension) && clickDocumentButton) {
+          clickDocumentButton(documentId, chunk);
+          return;
+        }
+        if (!documentUrl) return;
+        // Web page documents carry their own url; opening the internal
+        // /document route for them lands on an empty page.
+        if (/^https?:\/\//i.test(documentUrl)) {
+          window.open(documentUrl, '_blank', 'noopener,noreferrer');
+          return;
+        }
+        window.open(
+          `/document/${documentId}?ext=${fileExtension}&resource=${'document'}`,
+          '_blank',
+        );
+      },
+    [clickDocumentButton],
+  );
+
+  const rehypeWrapReference = () => {
+    return function wrapTextTransform(tree: any) {
+      visitParents(tree, 'text', (node, ancestors) => {
+        const latestAncestor = ancestors.at(-1);
+        if (
+          latestAncestor.tagName !== 'custom-typography' &&
+          latestAncestor.tagName !== 'code'
+        ) {
+          node.type = 'element';
+          node.tagName = 'custom-typography';
+          node.properties = {};
+          node.children = [{ type: 'text', value: node.value }];
+        }
+      });
+    };
+  };
+
+  const getReferenceInfo = useCallback(
+    (chunkKey: CitationKey) => {
+      // The marker itself selects the chunk: a numeric key indexes the
+      // payload, an agent [ID:<chunkId>] key matches the chunk's own id.
+      const chunkItem = resolveCitationChunk(reference?.chunks, chunkKey);
+
+      const documentList = Object.values(reference?.doc_aggs ?? {});
+      const document = documentList.find(
+        (x) => x?.doc_id === chunkItem?.document_id,
+      );
+      const documentId = document?.doc_id;
+      const documentUrl = document?.url;
+      const fileThumbnail = documentId ? fileThumbnails[documentId] : '';
+      const fileExtension = documentId ? getExtension(document?.doc_name) : '';
+      const imageId = chunkItem?.image_id;
+
+      return {
+        documentUrl,
+        fileThumbnail,
+        fileExtension,
+        imageId,
+        chunkItem,
+        documentId,
+        document,
+      };
+    },
+    [fileThumbnails, reference],
+  );
+
+  const renderPopoverContent = useCallback(
+    (chunkKey: CitationKey) => {
+      const {
+        documentUrl,
+        fileThumbnail,
+        fileExtension,
+        imageId,
+        chunkItem,
+        documentId,
+        document,
+      } = getReferenceInfo(chunkKey);
+
+      // The citation chip already gates on the chunk being found; this narrows
+      // chunkItem for the handlers below.
+      if (!chunkItem) {
+        return null;
+      }
+
+      return (
+        <div key={chunkItem.id} className="flex gap-2">
+          {imageId && (
+            <HoverCard>
+              <HoverCardTrigger>
+                <Image
+                  id={imageId}
+                  documentId={documentId}
+                  className={styles.referenceChunkImage}
+                ></Image>
+              </HoverCardTrigger>
+              <HoverCardContent>
+                <Image
+                  id={imageId}
+                  documentId={documentId}
+                  className={cn(styles.referenceImagePreview)}
+                ></Image>
+              </HoverCardContent>
+            </HoverCard>
+          )}
+          <div className={'space-y-2 max-w-[40vw] w-full'}>
+            <div
+              dangerouslySetInnerHTML={{
+                __html: DOMPurify.sanitize(chunkItem?.content ?? ''),
+              }}
+              className={classNames(styles.chunkContentText, 'w-full')}
+              dir="auto"
+            ></div>
+            {documentId && (
+              <div className="flex gap-1">
+                {fileThumbnail ? (
+                  <AuthenticatedImg
+                    src={fileThumbnail}
+                    alt=""
+                    className={styles.fileThumbnail}
+                  />
+                ) : (
+                  <SvgIcon
+                    name={`file-icon/${fileExtension}`}
+                    width={24}
+                  ></SvgIcon>
+                )}
+                <Button
+                  variant="link"
+                  onClick={handleDocumentButtonClick(
+                    documentId,
+                    chunkItem,
+                    fileExtension,
+                    documentUrl,
+                  )}
+                  className="text-ellipsis text-wrap"
+                >
+                  {document?.doc_name}
+                </Button>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    },
+    [getReferenceInfo, handleDocumentButtonClick],
+  );
+
+  const renderReference = useCallback(
+    (text: string) => {
+      // Chip numbers follow each unique marker's first occurrence in the
+      // full message (citationDisplayMap), so the same citation always
+      // renders as the same [N] chip and distinct citations get distinct
+      // numbers across paragraphs and list items. That numbering is
+      // display-only: the chunk behind a marker is resolved from the marker
+      // itself (position for numeric markers, chunk id for agent
+      // [ID:<chunkId>] markers), never from the display position — the
+      // payload ships in retrieval order, which is unrelated to the order
+      // the answer cites passages in.
+      const replacedText = reactStringReplace(
+        text,
+        citationWholeMarkerReg,
+        (match) => {
+          const chunkKey = getChunkKey(match);
+          const displayIndex = citationDisplayMap.get(chunkKey) ?? 0;
+          const chunkItem = resolveCitationChunk(reference?.chunks, chunkKey);
+          // The reference lands at message_end, after the answer stream, so an
+          // unresolved marker keeps its chip while loading. Afterwards it
+          // stays as literal text rather than pointing at the wrong chunk.
+          if (!chunkItem && !loading) {
+            return match;
+          }
+
+          return (
+            <HoverCard key={`${String(chunkKey)}-${displayIndex}`}>
+              <HoverCardTrigger>
+                <bdi className="text-text-secondary bg-bg-card rounded-2xl px-1 mx-1 text-nowrap inline-block">
+                  [{displayIndex + 1}]
+                </bdi>
+              </HoverCardTrigger>
+              {chunkItem && (
+                <HoverCardPrimitive.Portal>
+                  <HoverCardContent className="max-w-3xl">
+                    {renderPopoverContent(chunkKey)}
+                  </HoverCardContent>
+                </HoverCardPrimitive.Portal>
+              )}
+            </HoverCard>
+          );
+        },
+      );
+
+      return replacedText;
+    },
+    [citationDisplayMap, loading, reference?.chunks, renderPopoverContent],
+  );
+
+  const dir = getDirAttribute(content?.replace(currentReg, ''));
+  const showLoadingDots = useLoadingPause(loading, content);
+
+  return (
+    <div dir={dir} className={styles.markdownContentWrapper}>
+      <Markdown
+        rehypePlugins={
+          disableMath
+            ? [rehypeRaw, RehypeSanitizeAssistantMarkdown, rehypeWrapReference]
+            : [
+                rehypeRaw,
+                RehypeSanitizeAssistantMarkdown,
+                rehypeWrapReference,
+                rehypeKatex,
+              ]
+        }
+        remarkPlugins={
+          disableMath ? MarkdownRemarkPluginsLite : MarkdownRemarkPlugins
+        }
+        urlTransform={(url, key) => {
+          if (
+            key === 'src' &&
+            /^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/.test(url)
+          ) {
+            return url;
+          }
+          return defaultUrlTransform(url);
+        }}
+        components={
+          {
+            p: ({ children, ...props }: any) => <p {...props}>{children}</p>,
+            'custom-typography': ({ children }: { children: string }) =>
+              renderReference(children),
+            a({ href, children, ...props }: any) {
+              if (isArtifactUrl(href)) {
+                return (
+                  <ArtifactLink href={href} className={styles.artifactDownload}>
+                    {children}
+                  </ArtifactLink>
+                );
+              }
+              return (
+                <a href={href} {...omit(props, 'node')}>
+                  {children}
+                </a>
+              );
+            },
+            img({ src, alt, title }: any) {
+              if (isArtifactUrl(src)) {
+                return (
+                  <ArtifactImage
+                    src={src}
+                    alt={alt || ''}
+                    downloadLabel={t('common.download')}
+                  />
+                );
+              }
+              return <SafeImg src={src} alt={alt} title={title} />;
+            },
+            code(props: any) {
+              const { children, className, ...rest } = props;
+              const restProps = omit(rest, 'node');
+              const match = /language-(\w+)/.exec(className || '');
+              // Code content is literal for react-markdown, so the &lt;/&gt;
+              // entities restored by unescapeAngleBrackets survive parsing;
+              // decode them back.
+              const codeText = decodeAngleBracketEntities(String(children));
+              return match ? (
+                <SyntaxHighlighter
+                  {...restProps}
+                  PreTag="div"
+                  language={match[1]}
+                  wrapLongLines
+                >
+                  {codeText.replace(/\n$/, '')}
+                </SyntaxHighlighter>
+              ) : (
+                <code
+                  {...restProps}
+                  className={classNames(className, 'text-wrap')}
+                >
+                  {codeText}
+                </code>
+              );
+            },
+          } as any
+        }
+      >
+        {contentWithCursor}
+      </Markdown>
+      {showLoadingDots && (
+        <LoadingDots className="ml-1 inline-block text-text-secondary" />
+      )}
+    </div>
+  );
+}
+
+export default memo(MarkdownContent);

@@ -1,0 +1,293 @@
+<div align="center">
+<a href="https://cloud.ragflow.io/">
+<img src="https://raw.githubusercontent.com/infiniflow/ragflow/main/web/src/assets/logo-with-text.svg" width="520" alt="ragflow logo">
+</a>
+</div>
+
+<p align="center">
+  <a href="./README.md"><img alt="README in English" src="https://img.shields.io/badge/English-DFE0E5"></a>
+  <a href="./README_zh.md"><img alt="简体中文版自述文件" src="https://img.shields.io/badge/简体中文-DFE0E5"></a>
+  <a href="./README_tzh.md"><img alt="繁體版中文自述文件" src="https://img.shields.io/badge/繁體中文-DFE0E5"></a>
+  <a href="./README_ja.md"><img alt="日本語のREADME" src="https://img.shields.io/badge/日本語-DFE0E5"></a>
+  <a href="./README_ko.md"><img alt="한국어" src="https://img.shields.io/badge/한국어-DFE0E5"></a>
+  <a href="./README_fr.md"><img alt="README en Français" src="https://img.shields.io/badge/Français-DFE0E5"></a>
+  <a href="./README_id.md"><img alt="Bahasa Indonesia" src="https://img.shields.io/badge/Bahasa Indonesia-DFE0E5"></a>
+  <a href="./README_pt_br.md"><img alt="Português(Brasil)" src="https://img.shields.io/badge/Português(Brasil)-DFE0E5"></a>
+  <a href="./README_ar.md"><img alt="README in Arabic" src="https://img.shields.io/badge/Arabic-DBEDFA"></a>
+  <a href="./README_tr.md"><img alt="Türkçe README" src="https://img.shields.io/badge/Türkçe-DFE0E5"></a>
+  <a href="./README_ru.md"><img alt="Русская версия README" src="https://img.shields.io/badge/Русский-DFE0E5"></a>
+</p>
+
+<p align="center">
+    <a href="https://x.com/intent/follow?screen_name=infiniflowai" target="_blank">
+        <img src="https://img.shields.io/twitter/follow/infiniflow?logo=X&color=%20%23f5f5f5" alt="follow on X(Twitter)">
+    </a>
+    <a href="https://cloud.ragflow.io" target="_blank">
+        <img alt="Static Badge" src="https://img.shields.io/badge/Get-Started-4e6b99">
+    </a>
+    <a href="https://hub.docker.com/r/infiniflow/ragflow" target="_blank">
+        <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/infiniflow/ragflow-stats/main/badges/docker-pulls.json&style=flat-square&logo=docker&logoColor=white" alt="RAGFlow Docker image downloads">
+    </a>
+    <a href="https://github.com/infiniflow/ragflow/releases/latest">
+        <img src="https://img.shields.io/github/v/release/infiniflow/ragflow?color=blue&label=Latest%20Release" alt="Latest Release">
+    </a>
+    <a href="https://github.com/infiniflow/ragflow/blob/main/LICENSE">
+        <img height="21" src="https://img.shields.io/badge/License-Apache--2.0-ffffff?labelColor=d4eaf7&color=2e6cc4" alt="license">
+    </a>
+</p>
+
+<h4 align="center">
+  <a href="https://cloud.ragflow.io">Cloud</a> |
+  <a href="https://ragflow.io/docs/dev/">Document</a> |
+  <a href="https://github.com/infiniflow/ragflow/issues/12241">Roadmap</a> |
+  <a href="https://discord.gg/NjYzJD3GM3">Discord</a>
+</h4>
+
+<div align="center" style="margin-top:20px;margin-bottom:20px;">
+<img alt="RAGFlow in the GitHub Octoverse" src="https://raw.githubusercontent.com/infiniflow/ragflow-docs/refs/heads/image/image/ragflow-octoverse.png" width="1200"/>
+</div>
+
+<div align="center">
+<a href="https://trendshift.io/repositories/9064" target="_blank"><img src="https://trendshift.io/api/badge/repositories/9064" alt="infiniflow%2Fragflow | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+</div>
+
+<details open>
+<summary><b>📕 جدول المحتويات</b></summary>
+
+- 💡 [ما هو RAGFlow؟](#-ما-هو-ragflow)
+- 🎮 [ابدأ](#-ابدأ)
+- 🔥 [آخر التحديثات](#-آخر-التحديثات)
+- 🌟 [الميزات الرئيسية](#-الميزات-الرئيسية)
+- 🔎 [هندسة النظام](#-هندسة-النظام)
+- 🏠 [النشر المحلي](#-النشر-المحلي)
+- 📚 [التوثيق](#-التوثيق)
+- 📜 [Roadmap](#-roadmap)
+- 🏄 [المجتمع](#-المجتمع)
+- 🙌 [المساهمة](#-المساهمة)
+
+</details>
+
+## 💡 ما هو RAGFlow؟
+
+يُعد مشروع [RAGFlow](https://ragflow.io/) محركًا رائدًا ومفتوح المصدر للاسترجاع المعزز بالتوليد (<bdi dir="ltr">RAG</bdi>)، ويجمع أحدث تقنيات <bdi dir="ltr">RAG</bdi> مع قدرات الوكلاء لبناء طبقة سياق متقدمة لنماذج <bdi dir="ltr">LLMs</bdi>. يوفّر سير عمل <bdi dir="ltr">RAG</bdi> مبسّطًا وقابلًا للتكيّف مع المؤسسات بمختلف أحجامها. وبالاعتماد على [محرك سياق موحّد](https://ragflow.io/basics/what-is-agent-context-engine) وقوالب وكلاء جاهزة، يتيح <bdi dir="ltr">RAGFlow</bdi> للمطورين تحويل البيانات المعقّدة إلى أنظمة <bdi dir="ltr">AI</bdi> عالية الدقة وجاهزة للإنتاج بكفاءة وموثوقية.
+
+## 🎮 ابدأ
+
+جرّب النسخة التجريبية على [https://cloud.ragflow.io](https://cloud.ragflow.io).
+
+للنشر محليًا، راجع قسم [النشر المحلي](#-الاستضافة-الذاتية).
+
+<div align="center" style="margin-top:20px;margin-bottom:20px;">
+<img alt="Chunking demonstration" src="https://raw.githubusercontent.com/infiniflow/ragflow-docs/refs/heads/image/image/chunking.gif" width="1200"/>
+<img alt="Agentic workflow demonstration" src="https://raw.githubusercontent.com/infiniflow/ragflow-docs/refs/heads/image/image/agentic-dark.gif" width="1200"/>
+</div>
+
+## 🔥 آخر التحديثات
+
+- 2026-09-29 إصدار RAGFlow 1.0.0-rc1.
+
+- 2026-09-10 إضافة استيعاب محتوى الويب عبر خرائط المواقع.
+- 2026-08-19 إطلاق Knowledge Compilation لإنشاء Wiki وGraph وTree وPageIndex وMind Map وTimeline وSkills على مستوى المستند ومجموعة البيانات.
+- 2026-08-19 إطلاق Agentic RAG مع أوضاع التفكير Low وMedium وHigh وUltra.
+- 2026-07-02 إضافة استيعاب مصادر بيانات Google BigQuery والمزامنة التدريجية.
+
+راجع [ملاحظات الإصدار الكاملة](https://ragflow.io/docs/dev/release_notes) لمزيد من التحديثات.
+
+## 🌟 الميزات الرئيسية
+
+### 🍭 **"الجودة في الداخل، الجودة في الخارج"**
+
+- الفهم العميق للمستندات لاستخراج المعرفة من البيانات غير المنظمة
+  ذات التنسيقات المعقدة.
+- يجد "إبرة في كومة قش بيانات" من الرموز غير المحدودة حرفيًا.
+
+### 🍱 **التقطيع القائم على القالب**
+
+- ذكي وقابل للتفسير.
+- الكثير من خيارات القالب للاختيار من بينها.
+
+### 🧩 **تجميع المعرفة (Knowledge Compilation)**
+
+- يحوّل المحتوى على مستوى المستند ومجموعة البيانات إلى مخرجات معرفية منظمة، مثل Wiki وGraph وTree وPageIndex وMind Map وTimeline وSkills.
+- يتيح ضبط نماذج التجميع وقواعد المعالجة، ثم عرض المخرجات وتحديثها وإعادة إنشائها.
+
+### 🧠 **الاسترجاع الوكيلي (Agentic Retrieval)**
+
+- يحلل الأسئلة المعقدة، ويقسمها عند الحاجة، ويسترجع المعرفة ويتحقق من الأدلة عبر خطوات متعددة.
+- تدعم أوضاع التفكير Low وMedium وHigh وUltra ضبط عمق الاسترجاع والاستدلال حسب تعقيد السؤال.
+
+### 🌱 **استشهادات مؤرضة لتقليل الهلوسة**
+
+- تصور تقطيع النص للسماح بالتدخل البشري.
+- عرض سريع للمراجع الرئيسية والاستشهادات التي يمكن تتبعها لدعم الإجابات المبنية على أسس سليمة.
+
+### 🍔 **التوافق مع مصادر البيانات غير المتجانسة**
+
+- يدعم مستندات Word، وعروض PowerPoint، وجداول Excel، وملفات TXT، والصور، وملفات PDF، والنسخ الممسوحة ضوئيًا، والبيانات المنظمة، وصفحات الويب، والمزيد.
+
+### 🛀 **سير عمل RAG آلي وسهل**
+
+- تنسيق RAG مبسط يلبي احتياجات الشركات الشخصية والكبيرة على حد سواء.
+- نماذج LLMs قابلة للتكوين بالإضافة إلى نماذج embedding.
+- الاستدعاء المتعدد المقترن بإعادة التصنيف المدمجة.
+- APIs بديهي للتكامل السلس مع الأعمال.
+
+## 🔎 هندسة النظام
+
+<div align="center" style="margin-top:20px;margin-bottom:20px;">
+<img src="https://raw.githubusercontent.com/infiniflow/ragflow-docs/main/images/structure.jpg" alt="RAGFlow system architecture" width="1000" />
+</div>
+
+## 🏠 النشر المحلي
+
+يدعم النشر المحلي النشر باستخدام Docker والتشغيل من المصدر. يناسب Docker التقييم السريع واختبارات التكامل والإنتاج، بينما يناسب التشغيل من المصدر تطوير RAGFlow وتصحيح أخطائه. لا يتطلب Docker مترجم Go؛ ويتطلب التشغيل من المصدر إصدار Go المحدد في `go.mod`، كما يتطلب تطوير الواجهة Node.js وnpm.
+
+### 🐳 نشر Docker
+
+#### 📝 متطلبات نشر Docker
+
+- التكوين المبدئي الموصى به: 4 أنوية CPU وذاكرة RAM بسعة 16 GB ومساحة قرص متاحة 50 GB.
+- Docker ≥ 24.0.0، وDocker Compose ≥ v2.26.1.
+
+#### 🚀 بدء تشغيل الخادم
+
+1. عند استخدام Elasticsearch، اضبط `vm.max_map_count` على 262144 على الأقل. لا يلزم ذلك عادةً مع Infinity:
+
+   > ```bash
+   > sysctl vm.max_map_count
+   > sudo sysctl -w vm.max_map_count=262144
+   > ```
+
+2. استنسخ المستودع:
+
+   ```bash
+   git clone https://github.com/infiniflow/ragflow.git
+   ```
+
+3. انتقل إلى دليل Docker، وانتقل إلى وسم الإصدار، ثم شغّل الخدمات:
+
+   ```bash
+   cd ragflow/docker
+   git checkout v1.0.0
+   docker compose -f docker-compose.yml up -d
+   ```
+
+   > RAGFlow 1.0 open source uses CPU inference for DeepDoc layout analysis, OCR, and table recognition.
+
+4. تحقق من حالة التبعيات وجاهزية API:
+
+   ```bash
+   curl -f http://localhost/api/v1/system/healthz
+   docker logs --tail 50 ragflow-cpu
+   ```
+
+5. افتح `http://IP_OF_YOUR_MACHINE` في المتصفح وسجّل الدخول. عند استخدام الإعدادات الافتراضية، يمكن حذف منفذ HTTP الافتراضي `80`.
+
+6. أضف LLM وEmbedding وReranker من صفحة موفري النماذج، وأدخل اسم النموذج وعنوان الخدمة ومفتاح API.
+
+   > [llm_api_key_setup](https://ragflow.io/docs/dev/llm_api_key_setup)
+
+راجع [دليل البدء السريع](./docs/quickstart.mdx) لمزيد من التفاصيل.
+
+#### ⚙️ إعداد Docker وتعديله
+
+يستخدم نشر Docker الملفين `docker/.env` و`docker/docker-compose.yml`. اتبع [دليل إعداد Docker](./docker/README.md) لإعداد الصورة والمنافذ وكلمات المرور ومحرك المستندات ومصدر صور النماذج. ولدعم المنصات وبناء الصورة من المصدر، راجع [دليل بناء صورة Go ودعم المنصات](./docs/develop/build_docker_image.mdx). نظام macOS غير مدعوم حاليًا.
+
+### 🔨 التشغيل من المصدر
+
+#### 📝 متطلبات البناء من المصدر
+
+1. استنسخ المستودع وثبّت إصدار Go المحدد في `go.mod` وClang 20 وLLD 20 وCMake ≥ 4.0 وملفات تطوير PCRE2 والمكتبات الأصلية اللازمة لـ CGO.
+
+   ```bash
+   git clone https://github.com/infiniflow/ragflow.git
+   cd ragflow
+   ```
+
+2. شغّل برامج تنزيل التبعيات لتحضير المكتبات الأصلية الثابتة التي يربطها بناء Go (`download_dev_deps.py`) وموارد النماذج/المحلّلات التي يحمّلها الخلفية أثناء التشغيل (`download_deps.py`):
+
+   ```bash
+   uv run tools/scripts/download_dev_deps.py
+   uv run deps/download_deps.py
+   ```
+
+   يقوم `download_dev_deps.py` بتنزيل وفك pdfium وpdf_oxide وoffice_oxide وonnxruntime تحت `~/ragflow-native-libs`؛ ويقوم `download_deps.py` بتنزيل جدول cl100k ونماذج DeepDoc وأصول محلّلات التضمين تحت `deps/`. كلاهما برنامج Python؛ ويثبّت `uv run` تبعياته المعلنة تلقائيًا (`requests`، بالإضافة إلى `huggingface-hub` لتنزيل النماذج والمحلّلات). تجاوز هذه الخطوة إذا كنت قد جهّزت الموارد نفسها بوسيلة أخرى. عند التشغيل من جذر المستودع تجد خدمات Go مجلد `internal/rag/res/deepdoc` تلقائيًا؛ وللتشغيل من مجلد آخر عيّن `DEEPDOC_MODEL_DIR` على مساره المطلق.
+
+3. ابنِ الخدمات:
+
+   ```bash
+   ./build.sh --all
+   ```
+
+4. شغّل خدمات التبعية المحلية، وتأكد من إمكانية الوصول إلى المضيفين والمنافذ في **conf/service_conf.yaml**:
+
+   ```bash
+   sudo sysctl -w vm.max_map_count=262144
+   docker compose --env-file docker/.env -f docker/docker-compose-base.yml up -d --wait es01 mysql minio nats kvrocks
+   ```
+
+5. نفّذ ترحيل قاعدة البيانات:
+
+   ```bash
+   ./bin/ragflow_server --migrate
+   ```
+
+6. شغّل الخدمات الأربع في أربع نوافذ طرفية منفصلة:
+
+   النافذة 1: Admin على المنفذ `9381`.
+
+   ```bash
+   ./bin/ragflow_server --admin
+   ```
+
+   ```bash
+   ./bin/ragflow_server --ingestor
+   ```
+
+   النافذة 3: Syncer.
+
+   ```bash
+   ./bin/ragflow_server --syncer
+   ```
+
+   النافذة 4: API على المنفذ `9380`.
+
+   ```bash
+   ./bin/ragflow_server --api
+   ```
+
+7. عند تطوير الواجهة فقط، ثبّت Node.js وnpm ثم تحقق من جاهزية API:
+
+   ```bash
+   cd web
+   npm install
+   curl -f http://127.0.0.1:9380/api/v1/system/healthz
+   ```
+
+راجع [تشغيل الخدمة من المصدر](./docs/develop/launch_ragflow_from_source.md) لمزيد من التفاصيل.
+
+> **ملاحظات التشغيل:** لجعل إعداد Elasticsearch دائمًا، أضف `vm.max_map_count=262144` إلى `/etc/sysctl.conf`. في إعداد MySQL الافتراضي، ينفذ مدخل صورة Docker ترحيل قاعدة البيانات قبل تشغيل Admin وSyncer وIngestor وAPI. يستخدم DeepDoc في الإصدار المفتوح 1.0 استدلال CPU لتحليل التخطيط وOCR والجداول. بعد تغيير إعداد Docker، أعد تشغيل الخدمات واتبع [دليل Docker](./docker/README.md) للاحتفاظ بالبيانات أو حذفها. يجهز `download_dev_deps.py` المكتبات الأصلية لبناء Go، ويجهز `download_deps.py` النماذج وموارد المحلّلات وجدول cl100k؛ ويعمل كلاهما عبر `uv run`. ينفذ `--migrate` الترحيل ثم يخرج؛ ويشغّل `--admin` خدمة الإدارة، ويشغّل `--ingestor` خدمة الاستيعاب، ويشغّل `--syncer` خدمة مزامنة مصادر البيانات الخارجية، ويشغّل `--api` خدمة API لواجهة الويب وحزم SDK. تعني استجابة HTTP 200 أن API جاهز.
+
+## 📚 التوثيق
+
+- [البدء السريع](https://ragflow.io/docs/dev/)
+- [التكوين](https://ragflow.io/docs/dev/configurations)
+- [ملاحظات الإصدار](https://ragflow.io/docs/dev/release_notes)
+- [أدلة المستخدم](https://ragflow.io/docs/category/user-guides)
+- [أدلة المطورين](https://ragflow.io/docs/category/developer-guides)
+- [المراجع](https://ragflow.io/docs/dev/category/references)
+- [الأسئلة الشائعة](https://ragflow.io/docs/dev/faq)
+
+## 📜 Roadmap
+
+راجع [RAGFlow Roadmap 2026](https://github.com/infiniflow/ragflow/issues/12241)
+
+## 🏄 المجتمع
+
+- [Discord](https://discord.gg/NjYzJD3GM3)
+- [X](https://x.com/infiniflowai)
+- [مناقشات جيثب](https://github.com/orgs/infiniflow/discussions)
+
+## 🙌 المساهمة
+
+RAGFlow يزدهر من خلال التعاون مفتوح المصدر. وبهذه الروح، فإننا نحتضن المساهمات المتنوعة من المجتمع. إذا كنت ترغب في أن تكون جزءًا، فراجع [إرشادات المساهمة](https://ragflow.io/docs/dev/contributing) أولاً.

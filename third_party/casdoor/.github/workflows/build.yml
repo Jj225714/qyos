@@ -1,0 +1,376 @@
+name: Build
+
+env:
+  GO_VERSION: "1.26.10"
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+
+jobs:
+  go-tests:
+    name: Running Go tests
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:5.7
+        env:
+          MYSQL_DATABASE: casdoor
+          MYSQL_ROOT_PASSWORD: 123456
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ./go.mod
+      - name: Tests
+        run: |
+          go test -v $(go list ./...) -tags skipCi
+        working-directory: ./
+
+  frontend:
+    name: Front-end
+    runs-on: ubuntu-latest
+    needs: [go-tests]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 20
+          cache: "yarn"
+          cache-dependency-path: ./web/yarn.lock
+      - run: yarn install
+        working-directory: ./web
+      - run: yarn typecheck && yarn lint
+        working-directory: ./web
+      - run: CI=false yarn run build
+        working-directory: ./web
+      - name: Upload build artifacts
+        if: github.repository == 'casdoor/casdoor' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build-${{ github.run_id }}
+          path: ./web/build
+
+  # every master commit's frontend build is published as casdoor-web@0.0.0-c<commit>, servers running that commit
+  # install it instead of building it and let browsers load it from a public npm CDN (frontendCdnUrl in app.conf)
+  frontend-npm:
+    name: Front-end npm package
+    runs-on: ubuntu-latest
+    needs: [frontend]
+    if: github.repository == 'casdoor/casdoor' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download frontend build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build-${{ github.run_id }}
+          path: ./build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest
+      - name: Publish
+        working-directory: ./build
+        run: |
+          cat > package.json <<EOF
+          {
+            "name": "casdoor-web",
+            "version": "0.0.0-c${GITHUB_SHA}",
+            "description": "The built frontend of Casdoor commit ${GITHUB_SHA}, for serving it from a CDN",
+            "license": "Apache-2.0",
+            "homepage": "https://casdoor.org",
+            "repository": {
+              "type": "git",
+              "url": "git+https://github.com/casdoor/casdoor.git"
+            }
+          }
+          EOF
+          if npm view "casdoor-web@0.0.0-c${GITHUB_SHA}" version >/dev/null 2>&1; then
+            echo "casdoor-web@0.0.0-c${GITHUB_SHA} is already published, skipping"
+          else
+            npm publish --tag master --access public
+          fi
+
+  backend:
+    name: Back-end
+    runs-on: ubuntu-latest
+    needs: [go-tests]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ./go.mod
+      - run: go version
+      - name: Build
+        run: |
+          go build -race -ldflags "-extldflags '-static'"
+        working-directory: ./
+
+  linter:
+    name: Go-Linter
+    runs-on: ubuntu-latest
+    needs: [go-tests]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      # HTTP/1.1 and retries: proxy.golang.org resets HTTP/2 streams mid-download.
+      - name: Sync vendor tree
+        env:
+          GODEBUG: http2client=0
+        run: |
+          for i in 1 2 3; do
+            if go mod vendor; then
+              exit 0
+            fi
+            echo "go mod vendor failed (attempt $i), retrying in $((i * 10))s..."
+            sleep $((i * 10))
+          done
+          exit 1
+
+      # CI and local `make lint` both use the repo's gofumpt-only golangci-lint config.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9.2.0
+        with:
+          version: v2.11.4
+          args: --config .golangci.yml ./...
+
+  e2e:
+    name: e2e-test
+    runs-on: ubuntu-latest
+    needs: [go-tests]
+    # The suite is a few minutes' work. Anything near this is hung, not slow,
+    # and is worth failing rather than leaving to sit for the six-hour default.
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:5.7
+        env:
+          MYSQL_DATABASE: casdoor
+          MYSQL_ROOT_PASSWORD: 123456
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ./go.mod
+      # Started before the front-end steps so the backend compiles while yarn
+      # installs; it is waited on further down, once it is needed.
+      - name: start backend
+        run: nohup go run ./main.go > /tmp/backend.log 2>&1 &
+        working-directory: ./
+        # the cypress tests sign in as built-in/admin with this password
+        env:
+          initAdminPassword: "123"
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 20
+          cache: "yarn"
+          cache-dependency-path: ./web/yarn.lock
+      # Restored before `yarn install`, whose Cypress postinstall is what fills
+      # this directory.
+      - name: Cache the Cypress binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: cypress-${{ runner.os }}-${{ hashFiles('web/yarn.lock') }}
+      - run: yarn install
+        working-directory: ./web
+      - name: Wait for backend to be ready
+        run: |
+          echo "Waiting for backend server to start on port 8000..."
+          for i in {1..60}; do
+            if curl -s http://localhost:8000 > /dev/null 2>&1; then
+              echo "Backend is ready!"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "Backend failed to start within 60 seconds"
+              echo "Backend logs:"
+              cat /tmp/backend.log || echo "No backend logs available"
+              exit 1
+            fi
+            echo "Waiting... ($i/60)"
+            sleep 1
+          done
+      - uses: cypress-io/github-action@v7
+        with:
+          browser: chrome
+          # `yarn install` above already installed everything, Cypress included.
+          install: false
+          start: yarn start
+          wait-on: "http://localhost:7001"
+          wait-on-timeout: 210
+          working-directory: ./web
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: cypress-screenshots
+          path: ./web/cypress/screenshots
+
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Releases are cut by hand: push a `vX.Y.Z` tag and this job publishes it.
+    if: github.repository == 'casdoor/casdoor' && startsWith(github.ref, 'refs/tags/v')
+    needs: [frontend, backend, linter, e2e]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ./go.mod
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Download frontend build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build-${{ github.run_id }}
+          path: ./web/build
+
+      - name: Prepare Go caches
+        run: |
+          echo "GOMODCACHE=$RUNNER_TEMP/gomod" >> $GITHUB_ENV
+          echo "GOCACHE=$RUNNER_TEMP/gocache" >> $GITHUB_ENV
+          go clean -cache -modcache -testcache -fuzzcache
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker-release:
+    name: Docker Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    if: github.repository == 'casdoor/casdoor' && startsWith(github.ref, 'refs/tags/v')
+    needs: [frontend, backend, linter, e2e]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          # The image build stamps the version by walking the git history, so it
+          # needs the full history and the tags, not the default shallow clone.
+          fetch-depth: 0
+
+      # Tag `v1.2.3` publishes images `1.2.3`, `v1.2.3`, `1.2`, `1` and `latest`.
+      # Pre-release tags such as `v1.2.3-beta.1` only publish `1.2.3-beta.1` and
+      # `v1.2.3-beta.1`.
+      - name: Resolve the released version
+        id: version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          echo "version=$version" >> $GITHUB_OUTPUT
+          for image in casdoor casdoor-all-in-one; do
+            tags="casbin/$image:$version,casbin/$image:v$version"
+            if [[ "$version" != *-* ]]; then
+              tags="$tags,casbin/$image:${version%.*},casbin/$image:${version%%.*},casbin/$image:latest"
+            fi
+            echo "$image=$tags" >> $GITHUB_OUTPUT
+          done
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2
+        with:
+          version: latest
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Push to Docker Hub
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          target: STANDARD
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.version.outputs.casdoor }}
+
+      - name: Push All In One Version to Docker Hub
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          target: ALLINONE
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.version.outputs['casdoor-all-in-one'] }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The chart is published as `casdoor` on GHCR, which is what Artifact Hub
+      # lists. `casbin/casdoor` on Docker Hub is the image and uses the same tags,
+      # so Docker Hub keeps the old `casdoor-helm-charts` name for existing installs.
+      - name: Package and push Helm chart
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          helm package manifests/casdoor --version "$VERSION" --app-version "$VERSION"
+          helm push casdoor-$VERSION.tgz oci://ghcr.io/casdoor/helm-charts
+
+          sed -i 's/^name: casdoor$/name: casdoor-helm-charts/' manifests/casdoor/Chart.yaml
+          helm package manifests/casdoor --version "$VERSION" --app-version "$VERSION"
+          helm push casdoor-helm-charts-$VERSION.tgz oci://registry-1.docker.io/casbin
+
+      - name: Set up ORAS
+        uses: oras-project/setup-oras@v1
+
+      - name: Push Artifact Hub metadata
+        working-directory: manifests
+        run: |
+          for ref in ghcr.io/casdoor/helm-charts/casdoor registry-1.docker.io/casbin/casdoor-helm-charts; do
+            oras push "$ref:artifacthub.io" \
+              --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+              artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+          done

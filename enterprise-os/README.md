@@ -23,7 +23,8 @@ Jimage 前端 ── 员工自己的 JAPI Key（只在内存，不落盘）─�
 | 目录 | 内容 | 验证 |
 | --- | --- | --- |
 | `enterprise-os/os-bridge/` | 新服务（Node ≥22，零依赖）：模型代理、知识库 MCP 代理、Casdoor 同步（Webhook 加定时对账）、Jimage 内部接口 | `node --test`：27 项全部通过（Node 26.13） |
-| `enterprise-os/japi-patch/` | Sub2API 补丁（JAPI 源码不在本仓库）：管理员替用户建 Key、改 Key 状态、scoped 密钥权限 | 见其 README |
+| `enterprise-os/japi-patch/` | Sub2API 补丁：管理员替用户建 Key、改 Key 状态、scoped 密钥权限。`third_party/sub2api/` 已包含这些改动 | 见其 README |
+| `third_party/` | 四个上游项目的源码快照：sub2api（JAPI，含企业OS 改动）、librechat、ragflow、casdoor | 版本和许可证见 `third_party/README.md` |
 | `jadmin/` | Jadmin：管理员企业登录（显式关联）、登录 IM 三选一、部门目录、员工资料检查、安全修复 | `python -m unittest jadmin/test_enterprise.py` |
 | `config-vault/`、`web/` | Jimage：保险库 SSO 和前端「企业账号登录」；员工渠道独立，Key 不落盘 | `node --test config-vault/*.test.mjs`；web 下 `npx vitest run` |
 | `enterprise-os/deploy/casdoor/` | docker-compose、`.env` 模板、后台配置步骤 | 配置模板 |
@@ -34,7 +35,7 @@ Jimage 前端 ── 员工自己的 JAPI Key（只在内存，不落盘）─�
 
 以下命令都在服务器上、从本仓库检出后执行：`git clone https://github.com/Jj225714/qyos.git && cd qyos`（`main` 分支）。
 
-1. **JAPI**：JAPI 源码不在本仓库，把 `enterprise-os/japi-patch` 的补丁合进你们的 JAPI 源码（见其 README），跑测试后发布。
+1. **JAPI**：从 `third_party/sub2api/` 构建，它已包含企业OS 改动（见 `third_party/README.md`）。如果你们的 JAPI 有其他定制，改为把 `enterprise-os/japi-patch` 的补丁合进去。跑测试后发布。
    - 后台建一把 scoped 管理员密钥，权限见 `enterprise-os/japi-patch/README.md`，`allowed_ips` 只填 os-bridge 所在主机。
    - 按部门建分组。注意分组平台类型：向量接口只支持 OpenAI 平台，生图接口只支持 OpenAI 和 Grok 平台。
    - **新员工的初始余额**：JAPI 默认余额是 0，非订阅分组在余额为 0 时会拒绝调用。二选一：
