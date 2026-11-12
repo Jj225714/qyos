@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>企业OS</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="portal.css">
+    <script src="config.js"></script>
+    <script src="portal.js" defer></script>
+</head>
+<body>
+    <main class="page">
+        <header class="head">
+            <div class="mark" aria-hidden="true">
+                <svg viewBox="0 0 32 32" width="32" height="32"><rect x="3" y="3" width="11" height="11" rx="3"/><rect x="18" y="3" width="11" height="11" rx="3" class="soft"/><rect x="3" y="18" width="11" height="11" rx="3" class="soft"/><rect x="18" y="18" width="11" height="11" rx="3"/></svg>
+            </div>
+            <h1 id="title">企业OS</h1>
+            <p id="subtitle" class="subtitle" hidden></p>
+            <p id="login-hint" class="hint">用企业 IM 账号登录，不需要单独的密码。</p>
+        </header>
+
+        <section aria-label="应用">
+            <ul id="apps" class="apps">
+                <noscript>
+                    <li class="noscript">请在浏览器中启用 JavaScript 后刷新本页。</li>
+                </noscript>
+            </ul>
+        </section>
+
+        <footer class="foot">
+            <nav id="admin" class="admin" aria-label="管理员入口" hidden>
+                <span class="admin-label">管理员</span>
+                <span id="admin-links" class="admin-links"></span>
+            </nav>
+            <p id="help" class="help" hidden></p>
+        </footer>
+    </main>
+</body>
+</html>

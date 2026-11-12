@@ -1,4 +1,4 @@
-> 本仓库即 **qyos**（企业OS）：在 Jimage 源码基础上加入 Jadmin、os-bridge 与部署模板。企业OS 的总览与部署顺序见 [enterprise-os/README.md](enterprise-os/README.md)。
+> 本仓库即 **qyos**（企业OS），整体说明见 [README.md](README.md)。本文只讲其中的 Jimage 部分。
 
 # JimageAI 生图项目（jpmamoru）
 
@@ -8,7 +8,7 @@
 
 同日从服务器 `/opt/enterprise-ai-platform/image-system/` 取得运行目录快照，保存在本地 `server-snapshot/image-system/`，原始压缩包为 `server-snapshot.tar.gz`。该快照包括 `dist/`、示例运行配置及 Nginx 配置，约 44 MB、47 个文件。它没有 TypeScript/React 源码、源码映射或 Git 历史，因此无法仅从服务器还原完整开发源码。快照只用于对照线上文件，不提交 Git。
 
-本站基于 Infinite Canvas 开发。原仓库的许可证见 [LICENSE](LICENSE)，上游来源见 [README.md](README.md)。复制源码时排除了 `node_modules`、构建产物、测试输出、缓存、日志、运行数据和本地 `.env` 文件；这些内容通过安装依赖、构建或服务器备份恢复。
+本站基于 Infinite Canvas 开发。原仓库的许可证见 [LICENSE](LICENSE)，上游来源见 [JIMAGE.md](JIMAGE.md)。复制源码时排除了 `node_modules`、构建产物、测试输出、缓存、日志、运行数据和本地 `.env` 文件；这些内容通过安装依赖、构建或服务器备份恢复。
 
 ## 目录结构
 
@@ -26,7 +26,7 @@
 
 ## 与其他平台的关系
 
-Jimage 前端通过个人或服务器配置选择模型，图片请求经同源代理或模型网关连接 JAPI。Jadmin 是统一管理后台，代码见 [jadmin/README.md](jadmin/README.md)；配置保险库负责用户配置保存。JAPI 与 Jchat 的完整源码、数据库和运行密钥**不在本仓库**。若要在新服务器部署整套平台，需要另外取得这些模块的源码或安装包、域名和受保护配置。
+Jimage 前端通过个人或服务器配置选择模型，图片请求经同源代理或模型网关连接 JAPI。Jadmin 是统一管理后台，代码见 [jadmin/README.md](jadmin/README.md)；配置保险库负责用户配置保存。JAPI（Sub2API）、Jchat（LibreChat）、RAGFlow 和 Casdoor 的源码在 `third_party/`；数据库和运行密钥**不在本仓库**。在新服务器部署整套平台时，按 [enterprise-os/README.md](enterprise-os/README.md) 操作，并另外准备域名和受保护配置。
 
 ## 本地运行
 

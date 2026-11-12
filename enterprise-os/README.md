@@ -24,6 +24,7 @@ Jimage 前端 ── 员工自己的 JAPI Key（只在内存，不落盘）─�
 | --- | --- | --- |
 | `enterprise-os/os-bridge/` | 新服务（Node ≥22，零依赖）：模型代理、知识库 MCP 代理、Casdoor 同步（Webhook 加定时对账）、Jimage 内部接口 | `node --test`：27 项全部通过（Node 26.13） |
 | `enterprise-os/japi-patch/` | Sub2API 补丁：管理员替用户建 Key、改 Key 状态、scoped 密钥权限。`third_party/sub2api/` 已包含这些改动 | 见其 README |
+| `enterprise-os/portal/` | 员工统一入口页：Jchat、Jimage 两个大入口，底部管理员链接；纯静态，只需改 `config.js` | 本地浏览器预览（桌面、手机、深色） |
 | `third_party/` | 四个上游项目的源码快照：sub2api（JAPI，含企业OS 改动）、librechat、ragflow、casdoor | 版本和许可证见 `third_party/README.md` |
 | `jadmin/` | Jadmin：管理员企业登录（显式关联）、登录 IM 三选一、部门目录、员工资料检查、安全修复 | `python -m unittest jadmin/test_enterprise.py` |
 | `config-vault/`、`web/` | Jimage：保险库 SSO 和前端「企业账号登录」；员工渠道独立，Key 不落盘 | `node --test config-vault/*.test.mjs`；web 下 `npx vitest run` |
@@ -69,7 +70,8 @@ Jimage 前端 ── 员工自己的 JAPI Key（只在内存，不落盘）─�
 8. **Jimage**：从本分支构建 `web/`（`npm ci --legacy-peer-deps && npm run build`）并发布，部署本分支的 `config-vault/`；保险库加 `--sso-config`，运行时配置加 `enterpriseSsoEnabled: true`。
    - `bridge.baseUrl` 填 `http://127.0.0.1:3291`。
    - `bridge.japiInstance` 与 os-bridge 的 `japi.instance` 相同。只有当 os-bridge 的 JAPI 与保险库 `--auth-base` 是**同一个 Sub2API** 时才能这样填，否则用户 ID 会撞号。
-9. 试点部门全员走一遍，再推广。推广后关闭 Jimage 的手填渠道。
+9. **门户**：按 `enterprise-os/portal/README.md` 部署到 `os.jpmamoru.com`（示例），`config.js` 的 `loginIm` 与 Jadmin「登录方式」一致。通知员工只用这个地址。
+10. 试点部门全员走一遍，再推广。推广后关闭 Jimage 的手填渠道。
 
 ## os-bridge 接口
 
