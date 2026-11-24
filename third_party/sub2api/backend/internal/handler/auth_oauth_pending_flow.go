@@ -1473,6 +1473,10 @@ func readPendingOAuthBrowserSession(c *gin.Context, h *AuthHandler) (*service.Au
 		clearCookies()
 		return nil, nil, clearCookies, err
 	}
+	// 企业OS：企业绑定模式下，已保存的 OIDC 待处理会话（含启用前遗留的）一律拒绝并作废。
+	if err := h.enterprisePendingSessionError(c, svc, session); err != nil {
+		return nil, nil, clearCookies, err
+	}
 
 	return svc, session, clearCookies, nil
 }
@@ -1931,6 +1935,9 @@ func (h *AuthHandler) ExchangePendingOAuthCompletion(c *gin.Context) {
 	if err != nil {
 		clearCookies()
 		response.ErrorFrom(c, err)
+		return
+	}
+	if h.refuseEnterprisePendingSession(c, svc, session) {
 		return
 	}
 

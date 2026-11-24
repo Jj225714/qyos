@@ -1,0 +1,611 @@
+{
+  "base_commit": "e41f5c4f266c824a91346e02ce6bc93bcf58e459",
+  "coverage": "Source overlay recovered from runtime and build workspaces; no binary reproducibility claim.",
+  "casdoor_upstream_commit": "3d81f45bc98be0fe379b3a21973c783060066af5",
+  "files": {
+    "config-vault/README.md": {
+      "sha256": "fad1102129154ae590f03858d6205e0e94741acddddd831c3553dde0f65f080e",
+      "origin": "running release"
+    },
+    "config-vault/admin-users.mjs": {
+      "sha256": "3a2f3a8c0db94958b205c26d944b819bb62ace9429a893a8f8f9c9b15b3a9879",
+      "origin": "running release"
+    },
+    "config-vault/canvas-chat.mjs": {
+      "sha256": "d3fcd7540fb2a256a13a3257132a62c33d28235ba93a560ffbc13445227d05af",
+      "origin": "running release"
+    },
+    "config-vault/enterprise-sso.mjs": {
+      "sha256": "87bf649ea7fa2a8e49e751b87f53a36ffc608dd6abdb1e9962c201304582a5e8",
+      "origin": "running release"
+    },
+    "config-vault/image-model-control.mjs": {
+      "sha256": "260ceed05e21ec46ebea0f8b7fa5e8a6ddbec436364a4acb96ba38d968c73b5d",
+      "origin": "running release"
+    },
+    "config-vault/managed-image.mjs": {
+      "sha256": "5e504608dd1cf9b73890ac6e17fc58dccb9636aa3da63110d2f60f6f4f97fbec",
+      "origin": "running release"
+    },
+    "config-vault/server.mjs": {
+      "sha256": "def93b18946c22eced4e900551216c4498b6ee5a70bdc045a8dafcea52e2faa0",
+      "origin": "running release"
+    },
+    "config-vault/shared-image-provider.mjs": {
+      "sha256": "6486452bc7f05b4129f15d2182dde4497ae8b5b08dda48a528eaa4fd853667f8",
+      "origin": "running release"
+    },
+    "deploy/vps/casdoor-dingtalk.patch": {
+      "sha256": "901e3b93485404f0501396dfcbbbbb7997862ccf95f45846affe4c89287b2b3a",
+      "origin": "Casdoor build workspace at 3d81f45bc98be0fe379b3a21973c783060066af5"
+    },
+    "enterprise-os/os-bridge/config.example.json": {
+      "sha256": "7412085b64d05fb646f7b998ed4ce19ac8e9902dc35b7b887c498fb6b9a77c58",
+      "origin": "running release"
+    },
+    "enterprise-os/os-bridge/src/chat-model-control.mjs": {
+      "sha256": "b2560b311c02c23a426290d0ad64086573b2dd07034717174877c0f429c3b0ad",
+      "origin": "running release"
+    },
+    "enterprise-os/os-bridge/src/pilot-chat.mjs": {
+      "sha256": "814a0664d55a1f7aa107feffd3f3240da0e82015527f78f5237da2d2eff15de3",
+      "origin": "running release"
+    },
+    "enterprise-os/os-bridge/src/provisioner.mjs": {
+      "sha256": "63942170586892b6f080d80145cfa1bb82cbdb4dd32980c54b841e314e739cd4",
+      "origin": "running release"
+    },
+    "enterprise-os/os-bridge/src/server.mjs": {
+      "sha256": "00eaddfd67e644c8d38592cbebf3d5984108e79f8dd7f47d90b23c3670f2b051",
+      "origin": "running release"
+    },
+    "enterprise-os/os-bridge/src/sync.mjs": {
+      "sha256": "7d58b96b6c104aa23bad29c74e9098b01fa533998006cbef13821cd1e28fae32",
+      "origin": "running release"
+    },
+    "enterprise-os/os-bridge/src/work-email.mjs": {
+      "sha256": "d640c574f77242e6b7602c5e7c5673fec8d739a273980857705ffa539d111d2b",
+      "origin": "running release"
+    },
+    "enterprise-os/os-bridge/test/bridge.test.mjs": {
+      "sha256": "c67be6f528fde6f787970f89caa389f258ab9cd7a2090f80bb35f752e441303b",
+      "origin": "running release"
+    },
+    "enterprise-os/os-bridge/test/provisioner-concurrency.test.mjs": {
+      "sha256": "6b5c8d4ff2022e951f8590c724f97d3495c689ac44da161fe5d6681a9dcdda99",
+      "origin": "running release"
+    },
+    "enterprise-os/os-bridge/test/roster.test.mjs": {
+      "sha256": "b008aaffae1e37427e35ecb9f32b61c26ff215a6e410b2e8131f78b7325327ec",
+      "origin": "running release"
+    },
+    "enterprise-os/os-bridge/test/sso-entitlement.test.mjs": {
+      "sha256": "f57eab31e97a109e94b958e0cbda48c1b0a55bf4143f655291509b6ea7b67b1e",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/README.md": {
+      "sha256": "99ce75344816fea3e845a2cea62f0ff9647581af2af51e0a68993fb5bb72068d",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/config.example.json": {
+      "sha256": "8588bb0ef734cfb7f3075548fc2ce2942e5fe7c71fbb772856cf695c4d8dde64",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/package.json": {
+      "sha256": "cf345094ab67230497a53b195eac6ecf28f2b288fddf822a10fab39ae6e063e4",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/src/config.mjs": {
+      "sha256": "0c84f313c53ce26baf64cae0fa5c36d3c3087c8af79094c4399e3a88707cf78c",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/src/jwt.mjs": {
+      "sha256": "6323ec1ae22e5b210441bb4088c0691fa2584e4a9580b7f76dd325796cdcf066",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/src/mail-routes.mjs": {
+      "sha256": "0d86e0dd13853cef1b67e475d2a7247c8c6b002cf4a9a8c7fa40f8a07609e09f",
+      "origin": "running release",
+      "source_sha256": "c7b3a96e0e9dfde1cfb48afb63d9033e27d2cbcee62388f16d4a2574131ed072",
+      "adjustment": "Removed old site default"
+    },
+    "enterprise-os/portal-auth/src/oidc.mjs": {
+      "sha256": "5e51faed1cbebf72b800190bae235f05c010d2fa6a20ab9c1cb60a1261a32f24",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/src/server.mjs": {
+      "sha256": "4cdbd1620ca042a91be94e1f0b9d311acce1056c806005504f7792663c3f1f38",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/src/sessions.mjs": {
+      "sha256": "3ec8fc316f815711c4d5ff1976ef100090a1848e5824df85647e3eac1b505c63",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/src/work-routes.mjs": {
+      "sha256": "69842553c5a3572431d6bb085bc54d18062a6e4a436a27a73a028cceea2644e8",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/test/helpers.mjs": {
+      "sha256": "313a31f739e2fe152de0bd9832373eae136bf5981e2d1d5a4c77b4ffa305e5be",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/test/portal-auth.test.mjs": {
+      "sha256": "b2478c7fb721c64ccecd32d29b5a4ab37bca7ee9820ab5a70c7e8f5fc76f0bd2",
+      "origin": "running release"
+    },
+    "enterprise-os/portal-auth/test/review-regressions.test.mjs": {
+      "sha256": "58116a4d84636642d8134d07420e89bee2b0093b07feb347fb9511aadeda5fa3",
+      "origin": "running release"
+    },
+    "enterprise-os/portal/enterprise-mail.js": {
+      "sha256": "0ae0b3d993ae64ac5d16a4bd66c432af4ea0a27cdf41f973fd52fe0876355dbc",
+      "origin": "served portal source",
+      "source_sha256": "43976d7dc4e24a73c2cbd78a0c9b20197b63a9ae7fc848f968e659f2c8c852cf",
+      "adjustment": "Removed old site default"
+    },
+    "enterprise-os/portal/index.html": {
+      "sha256": "9abef7d619dcf9bab1c003ec3e4ff68652b9f01493d621f852b6c60e53120d64",
+      "origin": "served portal source"
+    },
+    "enterprise-os/portal/my-api-usage.css": {
+      "sha256": "4e859124cbab54b0e535a1da19d0369c8757a5498a7c11033741f5293e3fad3b",
+      "origin": "served portal source"
+    },
+    "enterprise-os/portal/my-api-usage.html": {
+      "sha256": "77f7482f4c19d5a817dbf1a25daefa9721c377db9011330dfcda6a7c36c406ba",
+      "origin": "served portal source",
+      "source_sha256": "baf1fc9055631c1372fd9fb6adcd5059474d70774b0661a8a3a7961fc5d8cf89",
+      "adjustment": "Removed old site default"
+    },
+    "enterprise-os/portal/my-api-usage.js": {
+      "sha256": "bf10661f0648cd96577e2a39ea9b1be7d25d52779ebc9fb6e67ac76fb9b24afc",
+      "origin": "served portal source"
+    },
+    "enterprise-os/portal/portal-core.js": {
+      "sha256": "aeaff776bbdb60a96ea2d95d1ea51652daacc38b5cf140ed97a4b4abe16240f9",
+      "origin": "served portal source"
+    },
+    "enterprise-os/portal/portal.css": {
+      "sha256": "866f7f10b28062d0153515e7ff6d7c85e31700de6d8185bd826d007164dc6a89",
+      "origin": "served portal source"
+    },
+    "enterprise-os/portal/portal.js": {
+      "sha256": "8dd1e38000a9ef8ad5c8061afede06dce22f3f9aa1ec5253869f9560615dc71a",
+      "origin": "served portal source"
+    },
+    "enterprise-os/portal/work-calendar.css": {
+      "sha256": "184e3c852eb48ed138623ad29cb1d0dc4d755159cbb79b6cbea594ea53665634",
+      "origin": "served portal source"
+    },
+    "enterprise-os/portal/work-calendar.js": {
+      "sha256": "b39cc983de1a56e25a6c20c9e4ef54070ab0299ee15226bc799e46c65c840276",
+      "origin": "served portal source"
+    },
+    "jadmin/api-usage-ui.js": {
+      "sha256": "72dfcf48a9ea65f69d4b5cd847b91e9fc701fc34709c4f1d0d0a0e8f4924c33d",
+      "origin": "running jadmin component"
+    },
+    "jadmin/api_usage_admin.py": {
+      "sha256": "7ac63f1a7ac148111265aae787868c0c0b6f98385beb110e8fc4cd0746f6b6a6",
+      "origin": "running jadmin component"
+    },
+    "jadmin/apply_client.py": {
+      "sha256": "c23d0bc4a0116ec4423c4122f3de65c6d313b059c7d75771e7e7eaac92f25768",
+      "origin": "running jadmin component"
+    },
+    "jadmin/capability_grants.py": {
+      "sha256": "e259c311d11b552116bf5fc404caae031fad957b726e1c5fa85d2739fc2c3db2",
+      "origin": "running jadmin component"
+    },
+    "jadmin/casdoor_admin.py": {
+      "sha256": "27825372822587440dd224f04003c86d9616c436238324e537d4e66326308e59",
+      "origin": "running jadmin component"
+    },
+    "jadmin/core-ui.js": {
+      "sha256": "c01b3f057acea7932c830c1054095011fc163cfc259b82c6174c98768614abee",
+      "origin": "running jadmin component"
+    },
+    "jadmin/email_confirmation.py": {
+      "sha256": "d3dbf040b895c661edf039312c628a0f78dd1e03cd0baf7c7fa62975a263f199",
+      "origin": "running jadmin component"
+    },
+    "jadmin/employee_email.py": {
+      "sha256": "fb74c80d23ff4e09524912c02c2496d8309e8304eca7bdfcd5692dc39996b756",
+      "origin": "running jadmin component"
+    },
+    "jadmin/enterprise-ui.js": {
+      "sha256": "b579e0a38a63ca56b2e19945d0be555c81924875babd0b5c785b703532f62198",
+      "origin": "running jadmin component"
+    },
+    "jadmin/enterprise.py": {
+      "sha256": "3a7a9f19d7b54973610444a14682190d009a979e5f5fae6f50772cd1d75f3a54",
+      "origin": "running jadmin component"
+    },
+    "jadmin/grants-ui.js": {
+      "sha256": "7e19afb455378ce8807b22dcf1c37d9c4d4e0c55f7499494e49535220a70ae13",
+      "origin": "running jadmin component"
+    },
+    "jadmin/librechat_config.py": {
+      "sha256": "4de6b00314ca8239d7d1b9285b690bf83b7c13fd1d25f1b6a19a0cd1b2062118",
+      "origin": "running jadmin component"
+    },
+    "jadmin/login_config.py": {
+      "sha256": "fe09975bd4fc7083381bf04c6bc404c0b1910418c553368bf08cbc083f31236a",
+      "origin": "running jadmin component"
+    },
+    "jadmin/mail-ui.js": {
+      "sha256": "e3d22adb00951de7b3685c0c694fbb1c4af5ceaefbb85e932cfe27b284b7a5aa",
+      "origin": "running jadmin component",
+      "source_sha256": "d3a0791cd69f9a9a262ba23dcfc0850a035bd316d490a3a55246150606386d1c",
+      "adjustment": "Removed old site default"
+    },
+    "jadmin/mail_http.py": {
+      "sha256": "8414bbf2485ead61f959fcd05c35689836703c9aa33bc556f7ba726829f4611a",
+      "origin": "running jadmin component"
+    },
+    "jadmin/mail_providers.py": {
+      "sha256": "583d1f2989e37c71667f648b78df1d97c9c41817ba97ab1003f26f02d06da4c9",
+      "origin": "running jadmin component",
+      "source_sha256": "9dc378355d76ffab4446abbaa50a26589ae422ca4ebeaa8bfcccb6baea34632f",
+      "adjustment": "Removed old site default"
+    },
+    "jadmin/mail_service.py": {
+      "sha256": "5d1259909f5c44a8392b25e936f71026dcbcce446d65894090ffaab73215a014",
+      "origin": "running jadmin component",
+      "source_sha256": "a1592698c444ae7e53b14760c4c7f341ffcb1df54b3cd53500f5262d0aaf51af",
+      "adjustment": "Removed old site default"
+    },
+    "jadmin/media-grants-ui.js": {
+      "sha256": "c24e19db03f337e9c9d2cc95ea957f6feb7477a6ef116f7b098480002c47a9ff",
+      "origin": "running jadmin component"
+    },
+    "jadmin/media-ui.js": {
+      "sha256": "eb25b1478f343d2730dc8c173fabfcf789094d95267a42d10f496e401cc0db45",
+      "origin": "running jadmin component"
+    },
+    "jadmin/media_config_service.py": {
+      "sha256": "77a08a7e2e11d0b941c871857c78a1f568f15b3944c3c28abc7904c79830a374",
+      "origin": "running jadmin component"
+    },
+    "jadmin/media_http.py": {
+      "sha256": "0e2e7fdd16394aab2d87a44617d5cdd37b869c85d38606a4ec90d9d0220850a9",
+      "origin": "running jadmin component"
+    },
+    "jadmin/model_config_service.py": {
+      "sha256": "d986e93bbd9304ec2742d93d72f4eb910139ddd12c3528e4ef655464ddc67494",
+      "origin": "running jadmin component"
+    },
+    "jadmin/model_transport.py": {
+      "sha256": "d62f1c613c91b4fc6a952a58dad1b4df30630baa86deb3447a647c0b4e1fb115",
+      "origin": "running jadmin component"
+    },
+    "jadmin/models-ui.js": {
+      "sha256": "8709784202cc828d46e517011abc71d7f32388177bceb5222d72d2dea554b8f9",
+      "origin": "running jadmin component"
+    },
+    "jadmin/module_grants.py": {
+      "sha256": "ed1704cdfbd3abb4e9c1ff67f1f321abad5bd82abb39823e3e31555750d2679b",
+      "origin": "running jadmin component"
+    },
+    "jadmin/modules-ui.js": {
+      "sha256": "64121c994169de459017b515761ee697ad231a9d6373c0f13dd8668f240ba7b8",
+      "origin": "running jadmin component"
+    },
+    "jadmin/onboarding-ui.js": {
+      "sha256": "6e07e5b18a4444ae5de84d43a395ba1b1119256118fae4ce0ce7c624507c1f8b",
+      "origin": "running jadmin component"
+    },
+    "jadmin/requirements.txt": {
+      "sha256": "84c554186c2655729777509f8046f408a842cbcf570c159c7850767d53035139",
+      "origin": "running jadmin component"
+    },
+    "jadmin/runtime-models-ui.js": {
+      "sha256": "644e6780022f055412d8e0148d093b44235f2d11c7197bbd70cf369f9e03a094",
+      "origin": "running jadmin component"
+    },
+    "jadmin/runtime_model_client.py": {
+      "sha256": "a373eb48b78fab73c697eba8ff70b194a22809b9df686f26d1dd18c04a8a8b00",
+      "origin": "running jadmin component"
+    },
+    "jadmin/runtime_model_settings.py": {
+      "sha256": "cb954730edc2bd774cc42808ce6b560dfab80e17fc5af20bd6dffa1b97856dfc",
+      "origin": "running jadmin component"
+    },
+    "jadmin/server.py": {
+      "sha256": "ed76f2d4324da18048c44fc5fc6605c9509b7956e4a8e10aaa802504d9c288f5",
+      "origin": "running jadmin component"
+    },
+    "jadmin/setup-ui.js": {
+      "sha256": "91677f2d86f21ddca1adddefa5d5bc6d7194e3c5efea4c7a46718602490a7467",
+      "origin": "running jadmin component"
+    },
+    "jadmin/setup_wizard.py": {
+      "sha256": "f57b7f9f5868ffaddd006e7c82ede56dad460c412a2d9fae5595ee3f882e4b42",
+      "origin": "running jadmin component"
+    },
+    "jadmin/shared_image_provider.py": {
+      "sha256": "1038eefbd08398b3a16298debb17bb3d9ff6a2b6fc1df9b9179b0041a9c9606d",
+      "origin": "running jadmin component"
+    },
+    "jadmin/shell-ui.js": {
+      "sha256": "67efbdc44b2834c2083429194df5b25cd4663781499440acbdb1520d9c5f1a37",
+      "origin": "running jadmin component"
+    },
+    "jadmin/work-ui.js": {
+      "sha256": "4887a0f66f0cf81115db690d545ef6b2309b6f3c9f12758bdb993bf16aa2cde5",
+      "origin": "running jadmin component"
+    },
+    "jadmin/work_core.py": {
+      "sha256": "3b326dfc70ee85527ba705fe606b1e6d0b70592e6ac2bc92050dbff23dc49033",
+      "origin": "running jadmin component"
+    },
+    "jadmin/work_http.py": {
+      "sha256": "9390189f4b6b14163a1ebdff3a7ff394bdb89b895c6e4852a5dfe89701809c11",
+      "origin": "running jadmin component"
+    },
+    "jadmin/work_reports.py": {
+      "sha256": "052689737c1570b1f68bd95de250fcdc98e2ba6bfe0b3b3196b456f3a292897e",
+      "origin": "running jadmin component"
+    },
+    "jadmin/work_task_draft.py": {
+      "sha256": "8fa61de723d964ce788e1f11a59559079d851c39458c0249d5e2731e8bfe940e",
+      "origin": "running jadmin component"
+    },
+    "provider-relay/fal-durable-queue.test.mjs": {
+      "sha256": "9db17c1332b4fc256309af59da853d7c6856de9ecd84d2017812eeb2c9cbcaa4",
+      "origin": "running release"
+    },
+    "provider-relay/job-persistence.test.mjs": {
+      "sha256": "c12570a893c81859dbb9794fb858b54f7fba7aa3f9186e812f44353b3a083e45",
+      "origin": "running release"
+    },
+    "provider-relay/job-service.md": {
+      "sha256": "bebba2665de15bf91cc335b2f6ba0b194f67010976bb02b3501d762b2b280f19",
+      "origin": "running release"
+    },
+    "provider-relay/job-service.mjs": {
+      "sha256": "ce0f60274b7634338dcdda1a5e54c5fe647fb5e969a6f3aa3ab0312a6b3f53c3",
+      "origin": "running release"
+    },
+    "third_party/sub2api/backend/internal/config/config.go": {
+      "sha256": "dcddc57f30b25c9edadebc4b5568952f63155aa56c27b612b5b66876d5173659",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/admin/custom_admin_key_users.go": {
+      "sha256": "275d8a706c12083292deb893cdece8fd978efc09eb6275e0b207de4cfb31ebbf",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/admin/qyos_binding_regression_test.go": {
+      "sha256": "cc905d9afa65a4cfc38747bc29eeade6872acc592d377619a28247222efe61d5",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/admin/user_handler.go": {
+      "sha256": "7bc49d04bc6a13a0f9c14a0a78c25c294757ab33514c63b820d906a9a11149ed",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/auth_dingtalk_oauth.go": {
+      "sha256": "3341907e546659a7ffc35316ca8c47c9c06554fb65fecca9d8a07ae4527ebab5",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/auth_handler.go": {
+      "sha256": "a72b5adc1af1f4495786b86eb56024f532227048a8af06a17327ce0034515eca",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/auth_linuxdo_oauth.go": {
+      "sha256": "e12915e5ba6cf140173f501a42226fe7c00a10021b36115e5fde8524fe45af4a",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/auth_oauth_pending_flow.go": {
+      "sha256": "0b39defe8034e6beebbf1ba8f4e327668d7f06c766beb819e9ed6f404f9716ab",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/auth_oidc_enterprise.go": {
+      "sha256": "650cb126f311b62c5b2cc355f789853249ec157bbcc68caa5a23218cfe3f74de",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/auth_oidc_enterprise_race_test.go": {
+      "sha256": "a85f2e9c202fe21a476d2c262132f3caff216a1203d1a2db234f35b106e1c0f7",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/auth_oidc_enterprise_test.go": {
+      "sha256": "310de29013f4a71ee57714354a65580a78337569374699c4d556d3bff18d0621",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/auth_oidc_oauth.go": {
+      "sha256": "7d6110de08657355bc570fdb019a3a4a27a7e7438aff84e8f523953dacad1507",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/handler/auth_wechat_oauth.go": {
+      "sha256": "1213f3397438631296eab3e1ee192189a06330d06a1d02727dacea106e3904c2",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/service/auth_enterprise_oidc.go": {
+      "sha256": "e44801055a17ee6ec76bde082ccc051b31dc97669f87a33a55bb8178b85369c2",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/service/auth_enterprise_oidc_nil_identity_test.go": {
+      "sha256": "ac10344146f0a53b2cefa556500201469001362a573194791ac36636fd0e4dc1",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/service/auth_enterprise_oidc_test.go": {
+      "sha256": "f44ffafd3b6c019971d5dac1af2492de0fbaf0e033b13b554a1dfb459e548c54",
+      "origin": "JAPI binding build workspace"
+    },
+    "third_party/sub2api/backend/internal/service/auth_service.go": {
+      "sha256": "a50480b9ff48e27b7d25defa1b4f746d69504cfad5ab894998cd4c39f0ed3119",
+      "origin": "JAPI binding build workspace"
+    },
+    "web/package.json": {
+      "sha256": "fb2d77ed2ffaf7a61a201412e840787e8e0485840878f3b4d7e8c0901746e6ef",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/app-main.tsx": {
+      "sha256": "49ee7b3a7ba8e2be9521a92da81449c4f16a3b19b63ddab76eeaa97f333eaee6",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/channel-setup-page.ts": {
+      "sha256": "72df1ac220f9a785d3f7e23076aeb294e9d758e225e8f471de6e50289f6c4f2c",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/components/canvas/asset-picker-modal.tsx": {
+      "sha256": "802983a72a18a24fde575328f8a5510be07899a67d424a64f2e0135edd2c3c9a",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/components/canvas/canvas-plugin-manager-modal.tsx": {
+      "sha256": "dcad4acbd3679d7f1fdabfddc349fc4143ef0d811f7eb1a2f1916d0cb8aa1205",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/components/canvas/canvas-side-panel.tsx": {
+      "sha256": "2bccdac6225ef221e2b2c467ff47a949696fda277e6de4c2c2454f532c839f8f",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/components/layout/config-local-proxy.tsx": {
+      "sha256": "fde98094bd16d860eaa31614b44277d89e9ea55e67788c56519937b2fd2d948f",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/constant/env.ts": {
+      "sha256": "5d9f40b091bc356f300064833eddf730767a59a09fa61bcb5a554e38b04e45ef",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/constant/official-plugin-lock.json": {
+      "sha256": "d63e869ec2f5aa257419db773525324a971bcca8526a2d841dfc644b5728aebb",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/i18n/locales/en-US.ts": {
+      "sha256": "2f10cb153c2a65c3298ea5d4da8fb42bea153071ed12a454440511c104ce26b1",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/i18n/locales/zh-CN.ts": {
+      "sha256": "55f3881c9197d17a4c87caa7245a564c1e93104df8577fb9c831a65fc6d5ab55",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/layouts/user-layout.tsx": {
+      "sha256": "3b3d5125a9fd7ad3abed4a3417d388182159512514775648c43ebcb71aaded0b",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/lib/canvas/plugin-evaluate.ts": {
+      "sha256": "ab37a8e112224e2cb7d94ee05c84a91f485a318b4697923bea4a11bc8c51acfd",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/lib/canvas/plugin-integrity.ts": {
+      "sha256": "7e221080c741110c16e9f45623345d4a4e11ca9bf69f53c5afe2d9f949f4423c",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/lib/canvas/plugin-loader.test.ts": {
+      "sha256": "beabf55e5be3054d79caae4282e56dc238c27f329cd89bf39a5c5f4173c8fcbc",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/lib/canvas/plugin-loader.ts": {
+      "sha256": "ecd5dbf66d900ed85a28bf35f026d8ca766b843055788d11182b26a4348e13a2",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/lib/canvas/plugin-registry.ts": {
+      "sha256": "6c5a677cfe23d34117a91f1d0ec5e5f89bb61c653fe7dc18e5cf4cce48c1a8e8",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/lib/local-proxy-auth.test.ts": {
+      "sha256": "b7da26b2e962ca2422a66a790f12a020fb1f73a55f028aee628faa26408cd812",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/lib/local-proxy-auth.ts": {
+      "sha256": "9792437ab77dddc804a5e3878113ab853f607a213ccd5b9b520858a3bce6eb94",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/lib/localforage-storage.test.ts": {
+      "sha256": "48c678127a3abe3e8575c7246d4acdd8a4508eea7e56a86a9ff4c7ec662cd266",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/lib/localforage-storage.ts": {
+      "sha256": "4092f0a3ae6305d24cdd8a461b5ec436ae33f7e4001e0112ebb6d393a112d379",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/lib/store-hydration.ts": {
+      "sha256": "c1f04866144e8f6e2dbbaa64f9ce35aa2ffb9c2a39695922f28d06b5ac942235",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/main.tsx": {
+      "sha256": "3101268ebcf5f3d21005b03672879f4b03a52ba66d8cbc884cfb65538f23051e",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/pages/assets/index.tsx": {
+      "sha256": "e15c6a8d1f563dc69f591c75a681c73f15fd66f63840f4dc1f0abe60de59dfd4",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/pages/canvas/index.tsx": {
+      "sha256": "ee16c87c4550410298e575caebcf758ff05b0d1498cd0121eb1665466a2a49ae",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/pages/canvas/project.tsx": {
+      "sha256": "7f2ed6f79a886c797f9bf3e344abe6c4bf4e391642d774c2af226f8b6633c50b",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/services/api/local-proxy.ts": {
+      "sha256": "83a05e5e2efcf38a1c05a143d94d8291dbc0daa7b4ed6d36fb967bc6eaf06b33",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/services/app-sync.ts": {
+      "sha256": "3bf76a90a6956574e4b7e022551bd8b9e40a22f3f41e83269b52c51d3381a334",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/services/file-storage.ts": {
+      "sha256": "96574c23cca7eec9dd1686af0564f09c39d6d3b4fca191e4269e60e7cdbe91d8",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/services/image-reference-sources.test.ts": {
+      "sha256": "b57c46711580e998ac1b772e842f19550c9ab6c087cb0b77d3f89c95a955445b",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/services/image-reference-sources.ts": {
+      "sha256": "ef83b26b9a0ec228382353dcd0ebb00b68f94a2ffd088f9bec00237523e4614a",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/services/image-storage.ts": {
+      "sha256": "24a08f59b0d883df3698a8de66c22beb3d10e697147f621f38712c0745f73dd6",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/services/storage-coordination.ts": {
+      "sha256": "aef3d9f1ec6cbaa52b86c290eb9a110287cd84988d916e5920a480daf30ce337",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/services/storage-gc.test.ts": {
+      "sha256": "533cdd6a8e45f67c6494860c4802b3118f9d6c25eb6dd3f4e7e9a17c69f85f75",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/services/storage-gc.ts": {
+      "sha256": "eae805e405ca8187c68c12d3eb84d571b887d82cc68d435842cf0a650e95e2a3",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/services/workspace-transfer.ts": {
+      "sha256": "f848849c8c745c40b44926d3ce9d88593ae6640ad991781852f2e430842d832a",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/stores/canvas/use-canvas-store.test.ts": {
+      "sha256": "b47d16ea7f5abff1dc02c4a1325f5a5fdc0e67992ba9ec0cacf126a77b87f734",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/stores/canvas/use-canvas-store.ts": {
+      "sha256": "24496c10bb9aa0a2464a35674185f156cdfe70463d3733ab81d57918d0b35f4b",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/stores/canvas/use-plugin-store.ts": {
+      "sha256": "528cdf6a10b285d6f3f8f66bbfa84d48c260485c1ff6458f8dbd699e9c3ffc76",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/stores/use-asset-store.test.ts": {
+      "sha256": "bcc2976e541404199f48af7bcf581e9f6af51f9cf2df1e581ea07b7b8a264a7a",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/stores/use-asset-store.ts": {
+      "sha256": "9c8cec9f8d16751a65ca3b425f7028bd451cf778530bd4c58958cf7410bcc442",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/src/workspace-transfer-page.ts": {
+      "sha256": "25a7bb29a2e0149fbef810cd41a1a691b97fe1f08acf6ef538a46ef3b1922a7b",
+      "origin": "release Jimage source tree (build match unverified)"
+    },
+    "web/vite.config.ts": {
+      "sha256": "46ca670dbf8acf1fde40173374bc0d1c785678884f41b50c2d534d163e91820c",
+      "origin": "release Jimage source tree (build match unverified)"
+    }
+  }
+}

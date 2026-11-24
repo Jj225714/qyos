@@ -23,7 +23,7 @@ export function safeReturnPath(value) {
     return typeof value === 'string' && value.length <= 2048 && /^\/(?![/\\])[^\s\\]*$/.test(value) ? value : '/';
 }
 
-export function createEnterpriseSso({ origin, prefix, oidc, bridge, managedChannel, sessionMaxHours, fetchImpl = fetch, now = () => Date.now(), log = message => console.error(message) }) {
+export function createEnterpriseSso({ origin, prefix, oidc, bridge, sessionMaxHours, fetchImpl = fetch, now = () => Date.now(), log = message => console.error(message) }) {
     if (!oidc?.issuer || !oidc.clientId || !oidc.clientSecret || !bridge?.baseUrl || !bridge.token) throw new Error('Enterprise SSO needs oidc.issuer/clientId/clientSecret and bridge.baseUrl/token');
     if (typeof bridge.japiInstance !== 'string' || !bridge.japiInstance.trim() || isPlaceholder(bridge.japiInstance)) throw new Error('Enterprise SSO needs bridge.japiInstance (must equal os-bridge japi.instance)');
     const maxHours = sessionMaxHours === undefined || sessionMaxHours === null ? DEFAULT_SESSION_MAX_HOURS : Number(sessionMaxHours);
@@ -31,11 +31,6 @@ export function createEnterpriseSso({ origin, prefix, oidc, bridge, managedChann
     const japiInstance = bridge.japiInstance.trim();
     const redirectUri = `${origin}${prefix}/oidc/callback`;
     const bridgeRoot = bridge.baseUrl.replace(/\/+$/, '');
-    const models = (Array.isArray(managedChannel?.models) ? managedChannel.models : []).filter(model => {
-        if (!isPlaceholder(model?.name)) return true;
-        log('[config-vault] enterprise SSO: ignoring placeholder model name in managedChannel.models; fill in the real model name');
-        return false;
-    });
     let discovery;
     let bridgeConfig;
 
@@ -116,23 +111,22 @@ export function createEnterpriseSso({ origin, prefix, oidc, bridge, managedChann
         const tokens = await response.json().catch(() => null);
         if (typeof tokens?.access_token !== 'string') throw fault(401);
         const me = sameInstance(await callBridge('/internal/me', tokens.access_token), '/internal/me');
-        return { user: me.user, returnTo: record.returnTo };
+        return { user: me.user, casdoorId: me.casdoorId, returnTo: record.returnTo };
     }
 
     /** Current JAPI status of an SSO session's account (blocks disabled / departed employees). */
-    async function status(userId) {
-        return sameInstance(await callBridge(`/internal/users/${encodeURIComponent(userId)}`), '/internal/users/:id').user;
+    async function identityStatus(userId) {
+        return sameInstance(await callBridge(`/internal/users/${encodeURIComponent(userId)}`), '/internal/users/:id');
+    }
+    async function status(userId) { return (await identityStatus(userId)).user; }
+    async function imageIdentityStatus(userId) {
+        const route = `/internal/managed-image/users/${encodeURIComponent(userId)}`;
+        const answer = sameInstance(await callBridge(route), '/internal/managed-image/users/:id');
+        if (answer.identityMode !== 'strict-live-image-v1') throw fault(503);
+        return answer;
     }
 
-    /** The employee's own JAPI key packaged as a Jimage channel file (`infinite-canvas-channel` v1). */
-    async function channelFile(userId) {
-        if (!managedChannel?.baseUrl) throw fault(404);
-        const { apiKey } = await callBridge(`/internal/users/${encodeURIComponent(userId)}/key`);
-        if (typeof apiKey !== 'string' || !apiKey) throw fault(503);
-        return { app: 'infinite-canvas-channel', version: 1, channel: { name: managedChannel.name || '企业模型网关', baseUrl: managedChannel.baseUrl, apiKey, models } };
-    }
-
-    return { start, finish, status, channelFile, sessionMs: Math.round(maxHours * 3600000) };
+    return { start, finish, status, imageIdentityStatus, sessionMs: Math.round(maxHours * 3600000) };
 }
 
 export function stateName(state) {

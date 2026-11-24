@@ -1057,6 +1057,11 @@ func (s *AuthService) shouldApplyEmailFirstBindDefaults(
 	identity *dbent.AuthIdentity,
 	created bool,
 ) bool {
+	// SSO-20261115-05: ensureEmailAuthIdentity returns nil when its write fails (e.g. under concurrent logins);
+	// check before reading the metadata (this previously panicked).
+	if identity == nil {
+		return false
+	}
 	source := emailAuthIdentitySource(identity.Metadata)
 	if source == "auth_service_login_backfill" {
 		return false

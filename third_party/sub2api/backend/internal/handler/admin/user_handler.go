@@ -357,6 +357,14 @@ func (h *UserHandler) Update(c *gin.Context) {
 		if !scopedAdminUserWriteAllowed(c, target, req.Role, req.Balance) {
 			return
 		}
+		if req.Notes != nil && isQyosBindingReader(adminaccess.RestrictedFromContext(c.Request.Context())) {
+			notes, err := mergeQyosBinding(target.Notes, *req.Notes)
+			if err != nil {
+				response.ErrorFrom(c, err)
+				return
+			}
+			req.Notes = &notes
+		}
 	}
 
 	// 把普通用户提升为管理员属权限敏感操作：需最近完成 step-up 2FA 验证。

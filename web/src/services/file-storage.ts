@@ -3,6 +3,8 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 
 import { withLocalProxy } from "@/stores/use-config-store";
+import { protectStorageKey } from "./storage-coordination";
+import { requestStorageMaintenance } from "./storage-gc";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
 
@@ -12,7 +14,7 @@ const objectUrls = new Map<string, string>();
 async function uploadMediaFileImpl(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
     const blob = typeof input === "string" ? await (await fetch(withLocalProxy(input))).blob() : input;
     const storageKey = `${prefix}:${nanoid()}`;
-    await store.setItem(storageKey, blob);
+    await writeProtectedBlob(storageKey, blob);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : blob.type.startsWith("audio/") ? await readAudioMeta(url) : {};
@@ -34,8 +36,14 @@ async function getMediaBlobImpl(storageKey: string) {
     return store.getItem<Blob>(storageKey);
 }
 
-async function setMediaBlobImpl(storageKey: string, blob: Blob) {
+/** A fresh blob gets a protection marker first, so startup cleanup keeps it even before anything references it. */
+async function writeProtectedBlob(storageKey: string, blob: Blob) {
+    await protectStorageKey(storageKey);
     await store.setItem(storageKey, blob);
+}
+
+async function setMediaBlobImpl(storageKey: string, blob: Blob) {
+    await writeProtectedBlob(storageKey, blob);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     return url;
@@ -52,13 +60,9 @@ async function deleteStoredMediaImpl(keys: Iterable<string>) {
     );
 }
 
+/** Same pass as image cleanup (storage-gc.ts): media referenced anywhere, including logs and drafts, is kept. */
 async function cleanupUnusedMediaImpl(usedData: unknown) {
-    const usedKeys = collectMediaStorageKeys(usedData);
-    const unused: string[] = [];
-    await store.iterate((_value, key) => {
-        if (!usedKeys.has(key)) unused.push(key);
-    });
-    await Promise.all(unused.map((key) => store.removeItem(key)));
+    return requestStorageMaintenance(usedData);
 }
 
 export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()) {

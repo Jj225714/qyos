@@ -1,33 +1,9 @@
-import json, os, subprocess, sys, threading
-from pathlib import Path
-
-ROOT=Path(__file__).resolve().parents[1]
-STATE=Path('/var/lib/enterprise-ai-platform/install-state.json')
-NAMES={'jiapi':'安装 JAPI','accounts':'验证统一账号和模型','image':'安装Jimage','jichat':'安装 Jchat'}
-lock=threading.Lock()
-busy=None
-notice=''
-
+"""DEP06 installation status; installation is managed outside Jadmin."""
 def status():
-    try: s=json.loads(STATE.read_text())
-    except (OSError,ValueError):s={'admin':'done'}
-    return {'stages':s,'busy':busy,'notice':notice}
+    return {'managedDeployment': True,
+            'stages': {'admin': 'done', 'jiapi': 'done', 'image': 'done', 'jichat': 'done', 'accounts': 'pending'},
+            'busy': None,
+            'notice': '服务已由服务器部署流程安装。企业登录、员工部门和模型渠道仍需配置；真实账号与模型联动尚未验收。'}
 
 def start(stage):
-    global busy,notice
-    if stage not in NAMES:return {'error':'未知安装步骤'},400
-    if not lock.acquire(blocking=False):return {'error':'已有安装任务正在运行'},409
-    steps=list(NAMES);idx=steps.index(stage)
-    previous='admin' if idx==0 else steps[idx-1]
-    if status()['stages'].get(previous)!='done':
-        lock.release();return {'error':'请先完成上一步'},409
-    busy=stage;notice='正在执行：'+NAMES[stage]
-    def work():
-        global busy,notice
-        try:
-            result=subprocess.run([sys.executable,str(ROOT/'scripts/staged_install.py'),stage],capture_output=True,text=True,encoding='utf-8',timeout=2400)
-            notice=result.stdout.strip()[-500:] or '安装未完成，请检查服务状态。'
-        except Exception:notice='任务中断，可检查状态后重试；不会删除数据库或重置已有管理员。'
-        finally:busy=None;lock.release()
-    threading.Thread(target=work,daemon=True).start()
-    return {'ok':True},202
+    return {'error': '当前部署由服务器维护，不支持在管理后台重复安装。请使用企业配置和模型配置入口完成后续设置。'}, 409

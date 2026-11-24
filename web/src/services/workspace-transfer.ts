@@ -13,7 +13,8 @@ function check(ok: unknown, message = "归档格式无效或不受支持"): asse
     if (!ok) throw new Error(message);
 }
 export function isWorkspaceKey(key: string) {
-    return /^(infinite-canvas(?::|-)|canvas-)/.test(key) && !/workspace[-_:]?(transfer|migration)|migration[-_:]?credential/i.test(key);
+    // The local proxy token is a per-run secret of this computer: never archived.
+    return /^(infinite-canvas(?::|-)|canvas-)/.test(key) && !/workspace[-_:]?(transfer|migration)|migration[-_:]?credential|proxy[-_:]?(session[-_:]?)?token/i.test(key);
 }
 export async function hash(bytes: Uint8Array) {
     return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.slice().buffer)))

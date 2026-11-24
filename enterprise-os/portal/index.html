@@ -3,39 +3,75 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="referrer" content="no-referrer">
+    <meta name="referrer" content="same-origin">
     <title>企业OS</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="portal.css">
-    <script src="config.js"></script>
+    <link rel="stylesheet" href="portal.css?v=mail1">
+    <link rel="stylesheet" href="work-calendar.css?v=priority1">
+    <script src="config.js?v=20261120-usage1"></script>
+    <script src="work-calendar.js?v=priority1"></script>
+    <script src="enterprise-mail.js?v=mail1"></script>
+    <script src="portal-core.js?v=mail1"></script>
     <script src="portal.js" defer></script>
 </head>
 <body>
+    <div id="backdrop" class="backdrop" aria-hidden="true">
+        <div class="mesh"></div>
+        <svg class="network" viewBox="0 0 1440 900" preserveAspectRatio="xMidYMid slice">
+            <g class="network-lines"><path d="M-80 740L220 560 480 680 780 430 1060 550 1490 280M-80 740L280 860 480 680 690 870 1060 550 1490 740M220 560L280 860M480 680L460 400 780 430 870 160 1060 550M460 400L160 210 220 560M780 430L690 870"/></g>
+            <g class="network-nodes"><circle cx="220" cy="560" r="5"/><circle cx="480" cy="680" r="6"/><circle cx="780" cy="430" r="5"/><circle cx="1060" cy="550" r="4"/><circle cx="460" cy="400" r="4"/><circle cx="280" cy="860" r="5"/></g>
+        </svg>
+    </div>
     <main class="page">
-        <header class="head">
-            <div class="mark" aria-hidden="true">
-                <svg viewBox="0 0 32 32" width="32" height="32"><rect x="3" y="3" width="11" height="11" rx="3"/><rect x="18" y="3" width="11" height="11" rx="3" class="soft"/><rect x="3" y="18" width="11" height="11" rx="3" class="soft"/><rect x="18" y="18" width="11" height="11" rx="3"/></svg>
-            </div>
-            <h1 id="title">企业OS</h1>
-            <p id="subtitle" class="subtitle" hidden></p>
-            <p id="login-hint" class="hint">用企业 IM 账号登录，不需要单独的密码。</p>
-        </header>
-
-        <section aria-label="应用">
-            <ul id="apps" class="apps">
-                <noscript>
-                    <li class="noscript">请在浏览器中启用 JavaScript 后刷新本页。</li>
-                </noscript>
-            </ul>
+        <section class="hero" aria-labelledby="title">
+            <header class="head"><img class="mark" src="favicon.svg" width="40" height="40" alt=""><h1 id="title">企业OS</h1></header>
+            <p class="eyebrow">ENTERPRISE WORKSPACE</p>
+            <h2 class="hero-title">让灵感落地<br>让协作发生</h2>
+            <p id="subtitle" class="subtitle">连接团队的知识、创造与行动</p>
+            <div class="capabilities" aria-label="工作空间"><span>智能对话</span><span>视觉创作</span><span>团队知识</span></div>
+            <div class="orbital" aria-hidden="true"><svg viewBox="0 0 560 210"><g class="orbit-lines"><ellipse cx="280" cy="112" rx="238" ry="63"/><ellipse cx="280" cy="112" rx="174" ry="46"/><path d="M42 112h476M280 49v126M98 71l364 82M98 153L462 71"/></g><g class="orbit-core"><path d="M280 60l58 30v50l-58 30-58-30V90z"/><path d="M222 90l58 30 58-30M280 120v50"/></g><circle class="orbit-signal" cx="280" cy="49" r="5"/><circle class="orbit-signal secondary-signal" cx="454" cy="112" r="4"/></svg></div>
         </section>
-
-        <footer class="foot">
-            <nav id="admin" class="admin" aria-label="管理员入口" hidden>
-                <span class="admin-label">管理员</span>
-                <span id="admin-links" class="admin-links"></span>
-            </nav>
-            <p id="help" class="help" hidden></p>
-        </footer>
+        <aside class="panel" aria-label="工作空间登录">
+            <div class="panel-heading"><span class="panel-kicker">你的企业工作空间</span><h2>欢迎回来</h2></div>
+            <p id="checking" class="status" role="status">正在检查登录…</p>
+            <section id="login" aria-label="登录" hidden>
+                <div class="tabs" role="tablist" aria-label="登录方式">
+                    <button id="tab-email" role="tab" aria-selected="false" aria-controls="panel-email" tabindex="-1" type="button">邮箱登录</button>
+                    <button id="tab-enterprise" role="tab" aria-selected="true" aria-controls="panel-enterprise" tabindex="0" type="button">企业统一登录</button>
+                </div>
+                <div id="panel-email" class="tab-panel" role="tabpanel" aria-labelledby="tab-email" hidden>
+                    <div class="email-symbol" aria-hidden="true">@</div>
+                    <h3>使用邮箱账号继续</h3>
+                    <p id="email-hint" class="hint">将打开统一登录页，可用的登录方式以该页面为准。</p>
+                    <a id="login-email" class="primary" href="/auth/login?method=email">前往登录<span aria-hidden="true">→</span></a>
+                    <p class="small email-note">邮箱登录能力尚未确认</p>
+                </div>
+                <div id="panel-enterprise" class="tab-panel" role="tabpanel" aria-labelledby="tab-enterprise">
+                    <p id="login-hint" class="hint">使用企业账号，连接你的工作空间。</p>
+                    <ul id="providers" class="providers" aria-label="企业登录平台"></ul>
+                    <p id="options-status" class="small" role="status">正在读取登录方式…</p>
+                    <a id="login-button" class="primary" href="/auth/login?method=enterprise">企业统一登录<span aria-hidden="true">→</span></a>
+                    <p class="small">可用方式由统一登录页决定</p>
+                </div>
+                <p id="login-error" class="notice" role="status" hidden></p>
+                <form id="logout-retry" method="post" action="/auth/logout" hidden><button class="secondary" type="submit">再次退出企业登录</button></form>
+                <noscript><p class="notice">请在浏览器中启用 JavaScript 后刷新本页。</p></noscript>
+            </section>
+            <section id="unavailable" aria-label="暂时不可用" hidden><p class="notice">登录服务暂时不可用，请稍后再试。</p><button id="retry" class="secondary" type="button">重试</button></section>
+            <section id="signed-in" aria-label="应用" hidden>
+                <div class="user-bar"><p id="greeting" class="greeting" hidden></p><form id="logout" method="post" action="/auth/logout" hidden><button class="secondary" type="submit">退出</button></form></div>
+                <p id="legacy-note" class="notice" hidden></p><ul id="apps" class="apps"></ul>
+                <p id="logout-note" class="small" hidden>“退出”会结束门户和企业登录；已打开的应用页面在各自会话到期后失效，公用电脑上请在应用内也点退出。</p>
+            </section>
+            <footer class="foot"><nav id="admin" class="admin" aria-label="管理员入口" hidden><span class="admin-label">管理员</span><span id="admin-links" class="admin-links"></span></nav><p id="help" class="help" hidden></p></footer>
+        </aside>
+        <section id="work-todo" class="wc wc-todo" aria-label="待办清单" hidden></section>
+        <section id="work-calendar" class="wc" aria-label="工作日历" hidden></section>
     </main>
+    <dialog id="media-preview" class="media-preview" aria-labelledby="media-preview-title">
+        <h2 id="media-preview-title">JMedia</h2>
+        <p>AI 媒体热点与内容分发功能正在筹备中。</p>
+        <form method="dialog"><button class="secondary" type="submit" autofocus>返回首页</button></form>
+    </dialog>
 </body>
 </html>

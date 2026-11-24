@@ -4,7 +4,8 @@ import { AlertTriangle, Download, Puzzle, RefreshCw, Trash2 } from "lucide-react
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
-import { installPluginFromUrl, setPluginEnabled, uninstallPlugin, updatePlugin } from "@/lib/canvas/plugin-loader";
+import { blockMessage, installOfficialPlugin, installReviewedPlugin, reviewPluginUrl, setPluginEnabled, trustInstalledPlugin, uninstallPlugin, type PluginReview } from "@/lib/canvas/plugin-loader";
+import { sha256Hex } from "@/lib/canvas/plugin-integrity";
 import { fetchOfficialPlugins, hasUpgrade, type OfficialPluginEntry } from "@/lib/canvas/plugin-registry";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { usePluginStore, type InstalledPlugin } from "@/stores/canvas/use-plugin-store";
@@ -12,8 +13,9 @@ import { usePluginStore, type InstalledPlugin } from "@/stores/canvas/use-plugin
 export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onClose: () => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const plugins = usePluginStore((state) => state.plugins);
+    const blocked = usePluginStore((state) => state.blocked);
     const [url, setUrl] = useState("");
     const [installing, setInstalling] = useState(false);
     const [busyId, setBusyId] = useState<string | null>(null);
@@ -43,14 +45,38 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
         if (open && official.length === 0 && !loadingOfficial && !officialError) void loadOfficial();
     }, [open, official.length, loadingOfficial, officialError, loadOfficial]);
 
+    // Third-party code: downloaded and shown by hash first; only the exact reviewed bytes run after confirmation.
+    const confirmReviewed = (review: PluginReview, onDone?: () => void) =>
+        modal.confirm({
+            title: "确认运行第三方插件代码",
+            width: 560,
+            content: (
+                <div className="space-y-2 text-xs">
+                    <p>插件代码将在本页面内运行，可以读取本站浏览器数据并以你的身份调用接口。请只信任来源可靠的代码。</p>
+                    <p className="break-all">地址：{review.url}</p>
+                    <p className="break-all">SHA-256：<code>{review.sha256}</code></p>
+                    <p>大小：{review.bytes} 字节</p>
+                </div>
+            ),
+            okText: "信任并安装这些代码",
+            cancelText: t("canvas.editors.cancel"),
+            onOk: async () => {
+                try {
+                    const plugin = await installReviewedPlugin(review, review.sha256);
+                    message.success(t("canvas.plugins.installedPlugin", { name: plugin.name }));
+                    onDone?.();
+                } catch (error) {
+                    message.error(t("canvas.plugins.installFailed", { error: error instanceof Error ? error.message : String(error) }));
+                }
+            },
+        });
+
     const handleInstallUrl = async () => {
         const target = url.trim();
         if (!target) return;
         setInstalling(true);
         try {
-            const plugin = await installPluginFromUrl(target);
-            message.success(t("canvas.plugins.installedPlugin", { name: plugin.name }));
-            setUrl("");
+            void confirmReviewed(await reviewPluginUrl(target), () => setUrl(""));
         } catch (error) {
             message.error(t("canvas.plugins.installFailed", { error: error instanceof Error ? error.message : String(error) }));
         } finally {
@@ -58,10 +84,32 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
         }
     };
 
+    const confirmTrustInstalled = async (record: InstalledPlugin) => {
+        const sha256 = await sha256Hex(record.source);
+        modal.confirm({
+            title: "确认信任已安装的插件代码",
+            width: 560,
+            content: (
+                <div className="space-y-2 text-xs">
+                    <p>此插件安装于校验机制启用之前，或代码已变化，因此未运行。确认后只允许当前这份代码运行。</p>
+                    <p className="break-all">来源：{record.url}</p>
+                    <p className="break-all">SHA-256：<code>{sha256}</code></p>
+                </div>
+            ),
+            okText: "信任并启用",
+            cancelText: t("canvas.editors.cancel"),
+            onOk: () => runOnPlugin(record, async () => void (await trustInstalledPlugin(record, sha256)), t("canvas.plugins.enabled")),
+        });
+    };
+
     const handleInstallOfficial = async (entry: OfficialPluginEntry) => {
+        if (!entry.trusted) {
+            message.error("此版本未在当前应用版本中登记，暂不能安装；请等待应用更新");
+            return;
+        }
         setBusyId(entry.id);
         try {
-            const plugin = await installPluginFromUrl(entry.url, { official: true });
+            const plugin = await installOfficialPlugin(entry);
             message.success(t("canvas.plugins.installed", { name: plugin.name }));
         } catch (error) {
             message.error(t("canvas.plugins.installFailed", { error: error instanceof Error ? error.message : String(error) }));
@@ -86,6 +134,16 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
     // Highlight the update action when a newer remote version is available.
     const installedControls = (record: InstalledPlugin, upgradable = false) => (
         <>
+            {blocked[record.id] ? (
+                <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-amber-600" title={blockMessage(blocked[record.id])}>
+                    已阻止
+                </span>
+            ) : null}
+            {blocked[record.id] && !record.local && !record.official ? (
+                <Button size="small" type="text" onClick={() => void confirmTrustInstalled(record)}>
+                    核对并信任
+                </Button>
+            ) : null}
             <Switch size="small" checked={record.enabled} loading={busyId === record.id} onChange={(checked) => runOnPlugin(record, () => setPluginEnabled(record, checked), t(checked ? "canvas.plugins.enabled" : "canvas.plugins.disabled"))} />
             {!record.local && (
                 <>
@@ -95,7 +153,15 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
                         icon={<RefreshCw className="size-4" />}
                         loading={busyId === record.id}
                         title={t(upgradable ? "canvas.plugins.upgradeAvailable" : "canvas.plugins.updateFromSource")}
-                        onClick={() => runOnPlugin(record, async () => void (await updatePlugin(record)), t("canvas.plugins.updated"))}
+                        onClick={() => {
+                            if (record.official) {
+                                const entry = official.find((item) => item.id === record.id && item.trusted);
+                                if (!entry) return void message.error("当前应用版本没有可校验的新版本");
+                                void runOnPlugin(record, async () => void (await installOfficialPlugin(entry)), t("canvas.plugins.updated"));
+                                return;
+                            }
+                            void reviewPluginUrl(record.url).then((review) => void confirmReviewed(review), (error) => message.error(error instanceof Error ? error.message : String(error)));
+                        }}
                     />
                     <Popconfirm title={t("canvas.plugins.uninstallTitle")} okText={t("canvas.plugins.uninstall")} cancelText={t("canvas.editors.cancel")} onConfirm={() => uninstallPlugin(record.id)}>
                         <Button type="text" size="small" danger icon={<Trash2 className="size-4" />} title={t("canvas.plugins.uninstall")} />
@@ -170,7 +236,7 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
                     {official.map((entry) => {
                         const record = recordById.get(entry.id);
                         // Show the update dot and highlight the action when the remote version is newer.
-                        const upgradable = Boolean(record && hasUpgrade(record.version, entry.version));
+                        const upgradable = Boolean(record && entry.trusted && hasUpgrade(record.version, entry.version));
                         const icon = entry.icon || <Puzzle className="size-4" />;
                         return row(
                             entry.id,
@@ -178,7 +244,7 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
                             entry.name,
                             // Show local and remote versions in the title so the update target is explicit.
                             upgradable && record ? `${record.version} → ${entry.version}` : entry.version,
-                            entry.description,
+                            entry.trusted ? entry.description : `${entry.description || ""}（此版本未在当前应用中登记，暂不能安装）`,
                             record ? (
                                 installedControls(record, upgradable)
                             ) : (

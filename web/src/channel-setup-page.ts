@@ -1,5 +1,8 @@
 import { CONFIG_STORE_KEY, buildApiUrl, useConfigStore } from "@/stores/use-config-store";
 import { mergeChannelConfigFile } from "@/services/channel-config-file";
+import { installLocalProxyAuth } from "@/lib/local-proxy-auth";
+
+installLocalProxyAuth();
 
 const status = document.getElementById("status")!;
 const token = new URLSearchParams(location.hash.slice(1)).get("setup");

@@ -368,6 +368,9 @@ func (h *AuthHandler) Login2FA(c *gin.Context) {
 			response.ErrorFrom(c, err)
 			return
 		}
+		if h.refuseEnterprisePendingSession(c, pendingSvc, pendingSession) {
+			return
+		}
 
 		decision, err := h.ensurePendingOAuthAdoptionDecision(c, pendingSession.ID, oauthAdoptionDecisionRequest{})
 		if err != nil {

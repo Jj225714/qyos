@@ -95,6 +95,7 @@ import {
     type ViewportTransform,
 } from "@/types/canvas";
 import type { ReferenceImage } from "@/types/image";
+import { StoreHydrationAlert } from "@/components/storage/store-hydration-alert";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
 // Register built-in nodes in the shared registry once when the module loads.
@@ -211,6 +212,9 @@ function InfiniteCanvasPage() {
     const addAsset = useAssetStore((state) => state.addAsset);
     const cleanupAssetImages = useAssetStore((state) => state.cleanupImages);
     const hydrated = useCanvasStore((state) => state.hydrated);
+    const canvasHydrationStatus = useCanvasStore((state) => state.hydrationStatus);
+    const canvasHydrationError = useCanvasStore((state) => state.hydrationError);
+    const retryCanvasHydration = useCanvasStore((state) => state.retryHydration);
     const createProject = useCanvasStore((state) => state.createProject);
     const openProject = useCanvasStore((state) => state.openProject);
     const updateProject = useCanvasStore((state) => state.updateProject);
@@ -3131,6 +3135,14 @@ function InfiniteCanvasPage() {
         [configInputsById, confirmStopGeneration, handleConfigNodeChange, handleGenerateNode, runningNodeId],
     );
 
+    if (canvasHydrationStatus === "error")
+        return (
+            <main className="flex h-full items-start justify-center p-6">
+                <div className="w-full max-w-2xl">
+                    <StoreHydrationAlert state={{ hydrationStatus: canvasHydrationStatus, hydrationError: canvasHydrationError, retryHydration: retryCanvasHydration }} label="画布" />
+                </div>
+            </main>
+        );
     if (!projectLoaded) return <CanvasRefreshShell />;
 
     return (

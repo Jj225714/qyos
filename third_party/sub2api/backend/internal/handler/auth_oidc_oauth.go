@@ -123,6 +123,16 @@ func (h *AuthHandler) OIDCOAuthStart(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	// 企业OS：企业绑定模式下按“生效配置”强制 PKCE / id_token 校验 / JWKS / 机密客户端，并禁止绑定意图。
+	cfg, enterprisePrefix, err := h.enterpriseOIDCConfig(cfg)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if enterprisePrefix != "" && normalizeOAuthIntent(c.Query("intent")) == oauthIntentBindCurrentUser {
+		response.ErrorFrom(c, infraerrors.Forbidden("ENTERPRISE_BIND_DISABLED", "account binding is disabled in enterprise mode"))
+		return
+	}
 
 	state, err := oauth.GenerateState()
 	if err != nil {
@@ -208,6 +218,12 @@ func (h *AuthHandler) OIDCOAuthCallback(c *gin.Context) {
 	frontendCallback := strings.TrimSpace(cfg.FrontendRedirectURL)
 	if frontendCallback == "" {
 		frontendCallback = oidcOAuthDefaultFrontendCB
+	}
+	cfg, enterprisePrefix, enterpriseErr := h.enterpriseOIDCConfig(cfg)
+	if enterpriseErr != nil {
+		log.Printf("[OIDC OAuth] enterprise mode refused: %s", infraerrors.Message(enterpriseErr))
+		redirectOAuthError(c, frontendCallback, "enterprise_oidc_misconfigured", "enterprise OIDC misconfigured", "")
+		return
 	}
 
 	if providerErr := strings.TrimSpace(c.Query("error")); providerErr != "" {
@@ -348,6 +364,28 @@ func (h *AuthHandler) OIDCOAuthCallback(c *gin.Context) {
 	}
 	if idClaims != nil && userInfoClaims.Subject != "" && idClaims.Subject != "" && strings.TrimSpace(userInfoClaims.Subject) != strings.TrimSpace(idClaims.Subject) {
 		redirectOAuthError(c, frontendCallback, "subject_mismatch", "userinfo subject does not match id_token", "")
+		return
+	}
+
+	// 企业OS：所有上游校验（state、PKCE、nonce、换码、id_token、userinfo/sub）都已通过；
+	// 企业绑定模式只替换下面的账号解析：只登录 os-bridge 绑定到此 sub 的非管理员账号。
+	if enterprisePrefix != "" {
+		enterpriseEmail := strings.TrimSpace(userInfoClaims.Email)
+		enterpriseUsername := strings.TrimSpace(userInfoClaims.Username)
+		enterpriseDisplayName := strings.TrimSpace(userInfoClaims.DisplayName)
+		if idClaims != nil {
+			enterpriseEmail = firstNonEmpty(enterpriseEmail, strings.TrimSpace(idClaims.Email))
+			enterpriseUsername = firstNonEmpty(enterpriseUsername, idClaims.PreferredUsername, idClaims.Name)
+			enterpriseDisplayName = firstNonEmpty(enterpriseDisplayName, idClaims.Name)
+		}
+		h.completeEnterpriseOIDCLogin(c, cfg, enterprisePrefix, frontendCallback, redirectTo, intent, issuer, subject, enterpriseEmail, firstNonEmpty(enterpriseUsername, oidcFallbackUsername(subject)), map[string]any{
+			"subject":                subject,
+			"issuer":                 issuer,
+			"email_verified":         emailVerified != nil && *emailVerified,
+			"enterprise_binding":     true,
+			"suggested_display_name": firstNonEmpty(enterpriseDisplayName, enterpriseUsername),
+			"suggested_avatar_url":   userInfoClaims.AvatarURL,
+		})
 		return
 	}
 
@@ -646,6 +684,9 @@ func (h *AuthHandler) CompleteOIDCOAuthRegistration(c *gin.Context) {
 		clearOAuthPendingSessionCookie(c, secureCookie)
 		clearOAuthPendingBrowserCookie(c, secureCookie)
 		response.ErrorFrom(c, err)
+		return
+	}
+	if h.refuseEnterprisePendingSession(c, pendingSvc, session) {
 		return
 	}
 	if err := ensurePendingOAuthCompleteRegistrationSession(session); err != nil {

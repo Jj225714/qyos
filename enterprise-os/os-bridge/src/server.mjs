@@ -6,9 +6,12 @@ import { pathToFileURL } from 'node:url';
 import { Readable } from 'node:stream';
 import { assertApplicationJwks, createJwtVerifier, identityFromClaims, TokenError } from './jwt.mjs';
 import { createJapiClient } from './japi.mjs';
-import { createCasdoorClient } from './casdoor.mjs';
+import { CHAT_PILOT_PATH, loadChatPilot } from './pilot-chat.mjs';
+import { chatModelSocketFd } from './chat-model-control.mjs';
+import { createCasdoorClient, identityFromCasdoorUser } from './casdoor.mjs';
+import { createWorkEmailCheck } from './work-email.mjs';
 import { createCasdoorSync } from './sync.mjs';
-import { createDepartments, createProvisioner, jadminDepartmentLoader } from './provisioner.mjs';
+import { bindingOf, createDepartments, createProvisioner, jadminDepartmentLoader } from './provisioner.mjs';
 
 // OpenAI-compatible paths that employees may call through the bridge.
 const MODEL_PATHS = new Map([
@@ -73,14 +76,17 @@ function emptyMcp(message) {
  *  - /mcp/knowledge     RAGFlow MCP proxy; the department's RAGFlow key is chosen server-side
  *  - /webhooks/casdoor  "someone changed" hints from Casdoor; the person is re-read from Casdoor
  */
-export function createBridgeHandler({ verifyToken, provisioner, departments, sync = null, japiBaseUrl, ragflowMcpUrl, secrets, fetchImpl = fetch, log = () => {}, bodyLimit = 32 * 1024 * 1024 }) {
+export function createBridgeHandler({ verifyToken, provisioner, departments, checkWorkEmail = null, sync = null, chatPilot = null, japiBaseUrl, ragflowMcpUrl, secrets, fetchImpl = fetch, log = () => {}, bodyLimit = 32 * 1024 * 1024 }) {
     const japiRoot = japiBaseUrl.replace(/\/+$/, '');
 
     async function employee(req) {
         // LibreChat sends the token in X-OS-Access-Token (its OpenAI client owns Authorization).
         const token = typeof req.headers['x-os-access-token'] === 'string' ? req.headers['x-os-access-token'] : bearer(req);
         if (!token) throw fault(401, 'NO_TOKEN');
-        return identityFromClaims(await verifyToken(token));
+        const claims = await verifyToken(token);
+        const identity = identityFromClaims(claims);
+        return { identity, checkExistingWorkEmail: !identity.emailVerified && checkWorkEmail ?
+            (async () => await checkWorkEmail(claims, identity, { existing: true })) : null };
     }
 
     async function forward(req, res, url, headers, responseHeaders, { body, inspect } = {}) {
@@ -118,7 +124,8 @@ export function createBridgeHandler({ verifyToken, provisioner, departments, syn
         const methods = MODEL_PATHS.get(path);
         if (!methods) throw fault(404);
         if (!methods.includes(req.method)) throw fault(405);
-        const entry = await provisioner.ensure(await employee(req));
+        const { identity, checkExistingWorkEmail } = await employee(req);
+        const entry = await provisioner.ensure(identity, { checkExistingWorkEmail });
         log({ event: 'model_call', path, japiUserId: entry.user.id });
         return forward(req, res, `${japiRoot}${path}`, { ...pick(req.headers, MODEL_REQUEST_HEADERS), authorization: `Bearer ${entry.key}` }, MODEL_RESPONSE_HEADERS);
     }
@@ -126,10 +133,10 @@ export function createBridgeHandler({ verifyToken, provisioner, departments, syn
     async function handleKnowledge(req, res, send) {
         if (!['GET', 'POST', 'DELETE'].includes(req.method)) throw fault(405);
         if (!ragflowMcpUrl) throw fault(404);
-        const identity = await employee(req);
+        const { identity, checkExistingWorkEmail } = await employee(req);
         // Same gate as model calls: a disabled or departed employee loses the knowledge base too,
         // even while their (long-lived) Casdoor token is still valid.
-        await provisioner.ensure(identity);
+        await provisioner.ensure(identity, { checkExistingWorkEmail });
         const dept = await departments.resolve(identity);
         if (!dept.ragflowKey) {
             if (req.method !== 'POST') throw fault(405);
@@ -160,6 +167,7 @@ export function createBridgeHandler({ verifyToken, provisioner, departments, syn
             const path = url.pathname;
             if (path === '/healthz') return send({ ok: true });
             if (path === '/webhooks/casdoor') return await handleWebhook(req, send);
+            if (chatPilot && path === CHAT_PILOT_PATH) return await chatPilot(req, res);
             if (path.startsWith('/v1/')) return await handleModels(req, res, path);
             if (path === '/mcp/knowledge') return await handleKnowledge(req, res, send);
             throw fault(404);
@@ -171,24 +179,57 @@ export function createBridgeHandler({ verifyToken, provisioner, departments, syn
  * Internal side of os-bridge (loopback only): identity lookups for the Jimage config vault, guarded by a
  * shared token. Kept off the container-reachable listener, because it hands out employees' keys.
  */
-export function createInternalHandler({ verifyToken, provisioner, departments, casdoor = null, sync = null, instance, secrets, log = () => {}, casdoorCacheMs = 60000, now = () => Date.now() }) {
+export function createInternalHandler({ verifyToken, provisioner, departments, casdoor = null, checkWorkEmail = null, sync = null, instance, secrets, log = () => {}, casdoorCacheMs = 60000, now = () => Date.now() }) {
     const casdoorStatus = new Map();
+    const ACTIVE = Object.freeze({ active: true, reason: null });
 
-    /** Whether the Casdoor user still exists and is not forbidden (cached briefly; unknown on Casdoor errors). */
-    async function casdoorActive(casdoorId) {
-        if (!casdoor || !casdoorId) return true;
+    /**
+     * Whether the bound Casdoor user may still use the bridge: exists, not forbidden/deleted and, when
+     * provisioning.requireDepartment is on and the Jadmin directory has loaded, in a department (same rule as
+     * model calls). Cached briefly. On Casdoor errors the last answer (or "active") is kept: this deliberate
+     * fail-open is unchanged, so a Casdoor outage never locks everybody out of Jimage.
+     */
+    async function casdoorEntitlement(casdoorId) {
+        if (!casdoor || !casdoorId) return ACTIVE;
         const cached = casdoorStatus.get(casdoorId);
-        if (cached && now() - cached.at < casdoorCacheMs) return cached.active;
-        try {
-            const person = await casdoor.userById(casdoorId);
-            const active = Boolean(person) && person.isForbidden !== true && person.isDeleted !== true;
-            casdoorStatus.set(casdoorId, { active, at: now() });
-            if (casdoorStatus.size > 10000) casdoorStatus.delete(casdoorStatus.keys().next().value);
-            return active;
-        } catch (error) {
+        if (cached && now() - cached.at < casdoorCacheMs) return cached.value;
+        let person;
+        try { person = await casdoor.userById(casdoorId); }
+        catch (error) {
             log({ event: 'casdoor_status_failed', message: error.message });
-            return cached ? cached.active : true;
+            return cached ? cached.value : ACTIVE;
         }
+        let value;
+        if (!person || person.isForbidden === true || person.isDeleted === true) value = { active: false, reason: 'FORBIDDEN' };
+        else if (provisioner.access) {
+            const verdict = await provisioner.access(identityFromCasdoorUser(person));
+            value = verdict.ok ? ACTIVE : { active: false, reason: verdict.reason };
+        } else value = ACTIVE;
+        casdoorStatus.set(casdoorId, { value, at: now() });
+        if (casdoorStatus.size > 10000) casdoorStatus.delete(casdoorStatus.keys().next().value);
+        return value;
+    }
+
+    /**
+     * Active employees whose department (same rule as model calls) is `code`: the reference list for a
+     * hand-managed LibreChat group. Inherits the resolver's last-good Jadmin directory on refresh failure.
+     */
+    async function roster(code) {
+        if (!casdoor) throw fault(503, 'CASDOOR_NOT_CONFIGURED');
+        let people;
+        // Casdoor error messages can carry upstream text; only a fixed code reaches the log and the client.
+        try { people = await casdoor.users(); } catch { throw fault(503, 'CASDOOR_UNAVAILABLE'); }
+        const members = [];
+        const excluded = { inactive: 0, noEmail: 0 };
+        for (const person of people) {
+            const identity = identityFromCasdoorUser(person);
+            if (identity.forbidden) { excluded.inactive += 1; continue; }
+            if (!identity.email) { excluded.noEmail += 1; continue; }
+            if ((await departments.resolve(identity)).name === code) members.push({ casdoorId: identity.casdoorId, email: identity.email, name: identity.name });
+        }
+        members.sort((a, b) => (a.email < b.email ? -1 : a.email > b.email ? 1 : 0));
+        log({ event: 'roster', department: code, members: members.length });
+        return { department: code, generatedAt: new Date(now()).toISOString(), members, excluded, ...(members.length === 0 ? { warning: 'NO_ACTIVE_MEMBERS' } : {}) };
     }
 
     return async (req, res) => {
@@ -200,19 +241,55 @@ export function createInternalHandler({ verifyToken, provisioner, departments, c
             if (!path.startsWith('/internal/')) throw fault(404);
             if (!sameSecret(req.headers['x-internal-token'], secrets.internalToken)) throw fault(401, 'BAD_INTERNAL_TOKEN');
             if (req.method !== 'GET') throw fault(405);
-            if (path === '/internal/config') return send({ instance, loginProvider: await departments.loginProvider() });
+            if (path === '/internal/config') return send({ instance, loginProvider: await departments.loginProvider(), loginStatus: await departments.loginStatus?.() || null });
+            if (path === '/internal/login-status') return send({ instance, ...await departments.freshLoginStatus() });
+            const liveImageUser = /^\/internal\/managed-image\/users\/([1-9][0-9]{0,19})$/.exec(path);
+            if (liveImageUser) {
+                // Paid routes never use the legacy, cached and deliberately fail-open entitlement check.
+                const { casdoorId, ...user } = await provisioner.status(liveImageUser[1]);
+                if (user.status !== 'active' || !casdoorId) throw fault(403, 'IMAGE_IDENTITY_DENIED');
+                if (!casdoor || !provisioner.access) throw fault(503, 'IMAGE_IDENTITY_UNAVAILABLE');
+                let person;
+                try { person = await casdoor.userById(casdoorId); }
+                catch { throw fault(503, 'IMAGE_IDENTITY_UNAVAILABLE'); }
+                const identity = identityFromCasdoorUser(person);
+                if (identity.casdoorId !== casdoorId || identity.forbidden || person?.owner !== casdoor.organization) throw fault(403, 'IMAGE_IDENTITY_DENIED');
+                const verdict = await provisioner.access(identity);
+                if (!verdict.ok || verdict.skipped) throw fault(403, 'IMAGE_IDENTITY_DENIED');
+                return send({ user, instance, casdoorId, identityMode: 'strict-live-image-v1' });
+            }
             if (path === '/internal/me') {
                 const token = bearer(req);
                 if (!token) throw fault(401, 'NO_TOKEN');
-                const entry = await provisioner.ensure(identityFromClaims(await verifyToken(token)));
-                return send({ user: entry.user, instance });
+                const claims = await verifyToken(token);
+                const identity = identityFromClaims(claims);
+                const nonce = req.headers['x-qyos-work-email-nonce'];
+                const workEmailConfirmed = !identity.emailVerified && checkWorkEmail && typeof nonce === 'string' &&
+                    /^[A-Za-z0-9_-]{43}$/.test(nonce) && claims.nonce === nonce && await checkWorkEmail(claims, identity);
+                const checkExistingWorkEmail = !identity.emailVerified && checkWorkEmail ?
+                    () => checkWorkEmail(claims, identity, { existing: true }) : null;
+                const entry = await provisioner.ensure(identity, { workEmailConfirmed, checkExistingWorkEmail });
+                // Display fields for the portal; never the key.
+                return send({ user: entry.user, instance, casdoorId: entry.casdoorId, name: identity.name, department: entry.department?.name ?? null });
             }
+            const rosterMatch = /^\/internal\/departments\/([a-z0-9][a-z0-9_-]{0,63})\/roster$/.exec(path);
+            if (rosterMatch) return send(await roster(rosterMatch[1]));
             const match = /^\/internal\/users\/([1-9][0-9]{0,19})(\/key)?$/.exec(path);
             if (!match) throw fault(404);
-            if (match[2]) return send({ apiKey: await provisioner.keyForUserId(match[1]) });
+            if (match[2]) {
+                const authorize = async casdoorId => {
+                    const verdict = await casdoorEntitlement(casdoorId);
+                    if (!verdict.active) throw fault(403, verdict.reason);
+                };
+                return send({ apiKey: await provisioner.keyForUserId(match[1], { authorize }) });
+            }
             const { casdoorId, ...user } = await provisioner.status(match[1]);
-            if (user.status === 'active' && !(await casdoorActive(casdoorId))) user.status = 'disabled';
-            return send({ user, instance });
+            if (user.status === 'active') {
+                const verdict = await casdoorEntitlement(casdoorId);
+                if (!verdict.active) Object.assign(user, { status: 'disabled', reason: verdict.reason });
+            }
+            // casdoorId lets callers (portal, vault) confirm the account is still bound to the same person.
+            return send({ user, instance, casdoorId });
         } catch (error) { fail(error); }
     };
 }
@@ -229,17 +306,32 @@ export async function loadBridge(config, { fetchImpl = fetch, log = line => proc
     const departments = createDepartments({ load, departments: config.departments || [], assignments: config.assignments || {}, defaultJapiGroupId: provisioning.requireDepartment === false ? (config.japi.defaultGroupId ?? null) : null, defaultRagflowKey: secrets.ragflowKeys?.['*'] || null, ragflowKeys: secrets.ragflowKeys || {}, log });
     const japi = createJapiClient({ baseUrl: config.japi.baseUrl, adminKey: secrets.japiAdminKey, fetchImpl });
     const newUser = { balance: config.japi.newUser?.balance, concurrency: config.japi.newUser?.concurrency, rpmLimit: config.japi.newUser?.rpmLimit };
-    const provisioner = createProvisioner({ japi, departments, keyName: config.japi.keyName || 'enterprise-os', requireDepartment: provisioning.requireDepartment !== false, requireEmailVerified: config.casdoor.requireEmailVerified ?? 'auto', newUser, log });
+    const provisioner = createProvisioner({ japi, departments, keyName: config.japi.keyName || 'enterprise-os', requireDepartment: provisioning.requireDepartment !== false, disableWithoutDepartment: provisioning.disableWithoutDepartment !== false, requireEmailVerified: config.casdoor.requireEmailVerified ?? 'auto', newUser, log });
     const verifyToken = createJwtVerifier({ issuer: config.casdoor.issuer, jwksUrls, audiences: config.casdoor.audiences, fetchImpl, log });
     const casdoor = config.casdoor.organization && config.casdoor.clientId && secrets.casdoorClientSecret
         ? createCasdoorClient({ baseUrl: config.casdoor.apiBaseUrl || config.casdoor.issuer, organization: config.casdoor.organization, clientId: config.casdoor.clientId, clientSecret: secrets.casdoorClientSecret, fetchImpl })
         : null;
+    const checkWorkEmail = casdoor && config.jadmin?.url && secrets.jadminToken && config.casdoor.workEmailPortalAudience &&
+        config.casdoor.audiences.includes(config.casdoor.workEmailPortalAudience)
+        ? createWorkEmailCheck({ casdoor, departments, baseUrl: config.jadmin.url, token: secrets.jadminToken,
+            portalAudience: config.casdoor.workEmailPortalAudience,
+            boundAudiences: [config.casdoor.workEmailChatAudience, config.casdoor.workEmailImageAudience]
+                .filter(a => typeof a === 'string' && a && a !== config.casdoor.workEmailPortalAudience && config.casdoor.audiences.includes(a)), fetchImpl }) : null;
     if (!casdoor) log({ event: 'casdoor_sync_disabled', message: 'casdoor.organization/clientId or secrets.casdoorClientSecret missing: webhooks are ignored and nobody is disabled automatically' });
     const sync = casdoor ? createCasdoorSync({ casdoor, provisioner, log, maxDisableRatio: config.reconcile?.maxDisableRatio ?? 0.2 }) : null;
+    let chatPilot = null;
+    try {
+        chatPilot = await loadChatPilot({ config: config.chatPilot, organization: config.casdoor.organization,
+            audience: config.casdoor.workEmailChatAudience, verifyToken, casdoor, japi, bindingOf, fetchImpl, log });
+    } catch { log({ event: 'chat_pilot_invalid_config' }); }
     const stopSync = sync ? sync.start(config.reconcile?.intervalMs ?? 600000) : () => {};
     return {
-        handler: createBridgeHandler({ verifyToken, provisioner, departments, sync, japiBaseUrl: config.japi.baseUrl, ragflowMcpUrl: config.ragflow?.mcpUrl, secrets, fetchImpl, log }),
-        internalHandler: createInternalHandler({ verifyToken, provisioner, departments, casdoor, sync, instance: config.japi.instance, secrets, log }),
+        handler: createBridgeHandler({ verifyToken, provisioner, departments, checkWorkEmail, sync, chatPilot: chatPilot?.handler, japiBaseUrl: config.japi.baseUrl, ragflowMcpUrl: config.ragflow?.mcpUrl, secrets, fetchImpl, log }),
+        internalHandler: createInternalHandler({ verifyToken, provisioner, departments, casdoor, checkWorkEmail, sync, instance: config.japi.instance, secrets, log }),
+        chatAdminHandler: chatPilot?.adminHandler ?? ((req, res) => {
+            res.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+            res.end('{"code":"MODEL_CONTROL_UNAVAILABLE"}');
+        }),
         stop: stopSync,
     };
 }
@@ -254,7 +346,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const configPath = configPathFromArgs(process.argv);
     if (!configPath) { console.error('usage: node src/server.mjs --config /etc/os-bridge/config.json'); process.exit(2); }
     const config = JSON.parse(await readFile(configPath, 'utf8'));
-    const { handler, internalHandler, stop } = await loadBridge(config);
+    const { handler, internalHandler, chatAdminHandler, stop } = await loadBridge(config);
     const listen = (server, host, port, name) => new Promise((ok, fail) => {
         server.once('error', fail);
         server.listen(port, host, () => { server.off('error', fail); console.log(JSON.stringify({ ts: new Date().toISOString(), event: 'listening', name, host, port })); ok(); });
@@ -263,7 +355,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const internalServer = createServer(internalHandler);
     await listen(publicServer, config.listen?.host || '127.0.0.1', config.listen?.port || 3290, 'public');
     await listen(internalServer, config.internal?.host || '127.0.0.1', config.internal?.port || 3291, 'internal');
-    const shutdown = () => { stop(); publicServer.close(); internalServer.close(); setTimeout(() => process.exit(0), 5000).unref(); };
+    const chatFd = chatModelSocketFd();
+    let chatAdminServer;
+    if (chatFd !== null) {
+        chatAdminServer = createServer({ headersTimeout: 5000, requestTimeout: 5000, connectionsCheckingInterval: 1000,
+            keepAliveTimeout: 5000, maxHeaderSize: 8192 }, chatAdminHandler);
+        await new Promise((ok, fail) => {
+            chatAdminServer.once('error', fail);
+            chatAdminServer.listen({ fd: chatFd }, () => { chatAdminServer.off('error', fail); ok(); });
+        });
+    }
+    const shutdown = () => { stop(); publicServer.close(); internalServer.close(); chatAdminServer?.close(); setTimeout(() => process.exit(0), 5000).unref(); };
     process.on('SIGTERM', shutdown);
     process.on('SIGINT', shutdown);
 }

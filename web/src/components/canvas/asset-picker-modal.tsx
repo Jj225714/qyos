@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { AssetHydrationBanner } from "@/components/storage/store-hydration-alert";
 import { Empty, Input, Modal, Pagination, Tag } from "antd";
 import { Search } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -86,6 +87,7 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
 
     return (
         <div className="space-y-4">
+            <AssetHydrationBanner />
             <div className="flex flex-wrap items-center gap-3">
                 <Input
                     className="w-56"

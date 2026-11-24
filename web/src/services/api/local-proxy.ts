@@ -1,12 +1,8 @@
-import i18n from "@/i18n";
+import { getLocalProxyToken, verifyLocalProxy } from "@/lib/local-proxy-auth";
 import { normalizeLocalProxyUrl } from "@/stores/use-config-store";
 
-/** The proxy answers its root path with its own identity payload, which doubles as a reachability check. */
-export async function testLocalProxy(proxyUrl: string) {
-    const base = normalizeLocalProxyUrl(proxyUrl);
-    if (!base) throw new Error(i18n.t("config.proxy.missingUrl"));
-    const response = await fetch(`${base}/`, { cache: "no-store" });
-    const data = response.ok ? ((await response.json().catch(() => null)) as { proxy?: string; version?: string } | null) : null;
-    if (!data?.proxy) throw new Error(i18n.t("config.proxy.unreachable"));
-    return `${data.proxy} v${data.version || "?"}`;
+/** Handshake with the configured proxy and token; refuses old proxies without token/origin protection. */
+export async function testLocalProxy(proxyUrl: string, token = getLocalProxyToken()) {
+    const { proxy, version } = await verifyLocalProxy(normalizeLocalProxyUrl(proxyUrl), token);
+    return `${proxy} v${version}`;
 }

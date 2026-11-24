@@ -419,7 +419,15 @@ type OIDCConnectConfig struct {
 	UserInfoEmailPath    string `mapstructure:"userinfo_email_path"`
 	UserInfoIDPath       string `mapstructure:"userinfo_id_path"`
 	UserInfoUsernamePath string `mapstructure:"userinfo_username_path"`
+
+	// 企业OS 绑定模式（仅配置文件，后台设置无法修改）：非空时，OIDC 只登录 JAPI 备注中
+	// 已由 os-bridge 绑定到同一 Casdoor 用户（"os-bridge casdoor:<sub>"）的非管理员账号，
+	// 从不新建、认领或绑定账号。唯一允许的值见 EnterpriseBindingPrefixOSBridge。
+	EnterpriseBindingPrefix string `mapstructure:"enterprise_binding_prefix"`
 }
+
+// EnterpriseBindingPrefixOSBridge 是 os-bridge 写入 JAPI 用户备注的绑定前缀（与 os-bridge BINDING_PREFIX 相同）。
+const EnterpriseBindingPrefixOSBridge = "os-bridge casdoor:"
 
 type DingTalkConnectConfig struct {
 	Enabled             bool   `mapstructure:"enabled"`
@@ -2015,6 +2023,7 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	cfg.OIDC.UserInfoEmailPath = strings.TrimSpace(cfg.OIDC.UserInfoEmailPath)
 	cfg.OIDC.UserInfoIDPath = strings.TrimSpace(cfg.OIDC.UserInfoIDPath)
 	cfg.OIDC.UserInfoUsernamePath = strings.TrimSpace(cfg.OIDC.UserInfoUsernamePath)
+	cfg.OIDC.EnterpriseBindingPrefix = strings.TrimSpace(cfg.OIDC.EnterpriseBindingPrefix)
 	cfg.OIDC.UsePKCEExplicit = hasExplicitConfigOrEnv("oidc_connect.use_pkce", "OIDC_CONNECT_USE_PKCE")
 	cfg.OIDC.ValidateIDTokenExplicit = hasExplicitConfigOrEnv("oidc_connect.validate_id_token", "OIDC_CONNECT_VALIDATE_ID_TOKEN")
 	cfg.Dashboard.KeyPrefix = strings.TrimSpace(cfg.Dashboard.KeyPrefix)
@@ -2293,6 +2302,7 @@ func setDefaults() {
 	viper.SetDefault("oidc_connect.userinfo_email_path", "")
 	viper.SetDefault("oidc_connect.userinfo_id_path", "")
 	viper.SetDefault("oidc_connect.userinfo_username_path", "")
+	viper.SetDefault("oidc_connect.enterprise_binding_prefix", "")
 
 	// DingTalk Connect OAuth 登录
 	viper.SetDefault("dingtalk_connect.enabled", false)
@@ -3133,6 +3143,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("wechat_connect.frontend_redirect_url invalid: %w", err)
 		}
 		warnIfInsecureURL("wechat_connect.frontend_redirect_url", weChat.FrontendRedirectURL)
+	}
+	if p := strings.TrimSpace(c.OIDC.EnterpriseBindingPrefix); p != "" && p != EnterpriseBindingPrefixOSBridge {
+		return fmt.Errorf("oidc_connect.enterprise_binding_prefix must be empty or %q", EnterpriseBindingPrefixOSBridge)
 	}
 	if c.OIDC.Enabled {
 		if strings.TrimSpace(c.OIDC.ClientID) == "" {

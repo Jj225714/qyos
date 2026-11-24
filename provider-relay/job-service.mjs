@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, open } from "node:fs/promises";
+import { mkdir, readFile, rename, open, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { taskView, TaskLimits } from './task-contract.mjs';
 import { listTasks } from './task-list.mjs';
@@ -29,12 +29,29 @@ function fingerprint(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-/** Small atomic JSON store. Caller credentials and input payloads are ciphertext only. */
+const JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const PROVIDER_JOB_ID = /^[A-Za-z0-9_-]{1,100}$/;
+const JOURNAL_LINE_MAX = 4096;
+const JOURNAL_BYTES_MAX = 1024 * 1024;
+const journalContext = (jobId) => JSON.stringify(['fal-accepted-v1', jobId]);
+
+/**
+ * Small atomic JSON store. Caller credentials and input payloads are ciphertext only.
+ *
+ * Next to the snapshot, `<path>.accepted.jsonl` records provider job ids that were accepted while the snapshot
+ * could not be written. Appends, snapshots and journal compaction run on one serialized chain; an entry is
+ * removed only after a successful snapshot that contains that job with that provider id.
+ */
 export class JsonJobStore {
   constructor(path, { now = () => Date.now(), retentionMs = 7 * 86400000 } = {}) {
     if (!Number.isSafeInteger(retentionMs) || retentionMs < 1) throw new Error('Invalid retention period');
     this.retentionMs = retentionMs;
     this.path = path;
+    this.journalPath = `${path}.accepted.jsonl`;
+    /** Optional QueueCipher; when set, journal entries must be sealed by it. */
+    this.journalCipher = null;
+    this.journal = [];
+    this.journalRejected = [];
     this.now = now;
     this.jobs = new Map();
     this.loaded = false;
@@ -42,8 +59,114 @@ export class JsonJobStore {
   }
 
   async load() {
-    this.loading ||= this.loadOnce();
+    this.loading ||= this.loadOnce().catch((error) => { this.loading = null; throw error; });
     return this.loading;
+  }
+
+  /** Runs one file operation after every earlier one, whatever their outcome (a failure never blocks later writes). */
+  enqueue(operation) {
+    const run = this.write.catch(() => undefined).then(operation);
+    this.write = run;
+    return run;
+  }
+
+  async settled() { await this.write.catch(() => undefined); }
+
+  /** Validated journal entry or null. */
+  parseJournalLine(line) {
+    if (!line || line.length > JOURNAL_LINE_MAX) return null;
+    let record;
+    try { record = JSON.parse(line); } catch { return null; }
+    if (!record || typeof record !== 'object' || record.v !== 1 || typeof record.jobId !== 'string' || !JOB_ID.test(record.jobId)) return null;
+    let providerJobId = record.providerJobId;
+    if (this.journalCipher) {
+      try {
+        const opened = this.journalCipher.open(record.sealed, journalContext(record.jobId));
+        if (opened?.jobId !== record.jobId) return null;
+        providerJobId = opened.providerJobId;
+      } catch { return null; }
+    } else if (record.sealed !== undefined) return null;
+    if (typeof providerJobId !== 'string' || !PROVIDER_JOB_ID.test(providerJobId)) return null;
+    return { jobId: record.jobId, providerJobId, line };
+  }
+
+  async readJournal() {
+    let raw;
+    try { raw = await readFile(this.journalPath, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    // Bounded read; a journal beyond the bound is never compacted, so entries past it are not erased.
+    if (raw.length > JOURNAL_BYTES_MAX) { raw = raw.slice(0, JOURNAL_BYTES_MAX); this.journalTruncated = true; }
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      const entry = this.parseJournalLine(line);
+      if (entry) this.journal.push(entry); else this.journalRejected.push(line.slice(0, JOURNAL_LINE_MAX));
+    }
+  }
+
+  /**
+   * Applies journal ids to jobs that exist and are unresolved. Conflicts fail closed:
+   * - journal names a different id than the snapshot: the snapshot id stays (it was durably written first), flagged;
+   * - two journal entries name different ids for a job without one: NO id is applied and the job is held as
+   *   "uncertain" (code journal_conflict) - neither id is queried nor anything resubmitted; entries stay for inspection.
+   */
+  applyJournal() {
+    const byJob = new Map();
+    for (const entry of this.journal) {
+      if (!byJob.has(entry.jobId)) byJob.set(entry.jobId, new Set());
+      byJob.get(entry.jobId).add(entry.providerJobId);
+    }
+    for (const [jobId, ids] of byJob) {
+      const job = this.jobs.get(jobId);
+      if (!job || ['succeeded', 'failed', 'canceled'].includes(job.status)) continue;
+      if (job.providerJobId) {
+        if (ids.size > 1 || !ids.has(job.providerJobId)) job.journalConflict = true;
+        continue;
+      }
+      if (ids.size > 1) {
+        job.journalConflict = true;
+        job.status = 'uncertain'; job.stage = 'uncertain'; job.finishedAt = this.now(); delete job.sealed;
+        job.error = { code: 'journal_conflict', message: 'Conflicting provider job ids were recorded; nothing is queried or resubmitted. An operator must inspect the job journal.' };
+        continue;
+      }
+      job.providerJobId = [...ids][0];
+      // Accepted by the provider: never a waiting/dispatchable job again. The restart rules turn it into "recoverable".
+      if (job.durableQueue) job.queueState = 'submitting';
+      if (['queued', 'uncertain'].includes(job.status)) job.status = 'running';
+      delete job.finishedAt;
+      job.error = { code: 'recovered_from_journal', message: 'Provider job id restored after a failed save; querying the existing job only.' };
+    }
+  }
+
+  /** Durably appends one accepted provider id (fsync before resolving). */
+  recordAccepted(jobId, providerJobId) {
+    if (!JOB_ID.test(jobId) || !PROVIDER_JOB_ID.test(providerJobId)) return Promise.reject(new Error('Invalid journal entry'));
+    const record = this.journalCipher
+      ? { v: 1, jobId, sealed: this.journalCipher.seal({ jobId, providerJobId }, journalContext(jobId)) }
+      : { v: 1, jobId, providerJobId };
+    const line = JSON.stringify(record);
+    return this.enqueue(async () => {
+      await mkdir(dirname(this.path), { recursive: true });
+      const handle = await open(this.journalPath, 'a', 0o600);
+      try { await handle.appendFile(`${line}\n`); await handle.sync(); } finally { await handle.close(); }
+      this.journal.push({ jobId, providerJobId, line });
+    });
+  }
+
+  /** After a successful snapshot: drop the journal entries it covers (best effort; a failure keeps them). */
+  async compactJournal(covered) {
+    if (this.journalTruncated) return;
+    const remaining = this.journal.filter((entry) => covered.get(entry.jobId) !== entry.providerJobId);
+    if (remaining.length === this.journal.length) return;
+    try {
+      const lines = [...this.journalRejected, ...remaining.map((entry) => entry.line)];
+      if (!lines.length) await unlink(this.journalPath).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+      else {
+        const temp = `${this.journalPath}.${process.pid}.${randomUUID()}.tmp`;
+        const handle = await open(temp, 'wx', 0o600);
+        try { await handle.writeFile(lines.map((line) => `${line}\n`).join('')); await handle.sync(); } finally { await handle.close(); }
+        await rename(temp, this.journalPath);
+      }
+      this.journal = remaining;
+    } catch { /* entries stay until a later snapshot compacts them */ }
   }
 
   async loadOnce() {
@@ -56,6 +179,10 @@ export class JsonJobStore {
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
+    // Accepted provider ids that never reached the snapshot are restored before the restart rules below,
+    // so such a job becomes query-only "recoverable" rather than "uncertain".
+    await this.readJournal();
+    this.applyJournal();
     // A process restart cannot safely replay a paid submit. Jobs with a provider id
     // can be resumed by the caller; jobs without one are explicitly uncertain.
     for (const job of this.jobs.values()) {
@@ -95,7 +222,8 @@ export class JsonJobStore {
 
   async flush() {
     const data = JSON.stringify([...this.jobs.values()]);
-    this.write = this.write.then(async () => {
+    const covered = new Map([...this.jobs.values()].filter((job) => job.providerJobId).map((job) => [job.id, job.providerJobId]));
+    return this.enqueue(async () => {
       await mkdir(dirname(this.path), { recursive: true });
       const temp = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
       const handle = await open(temp, 'wx', 0o600);
@@ -111,8 +239,8 @@ export class JsonJobStore {
       }
       if (lastError) throw lastError;
       if (process.platform !== 'win32') { const dir = await open(dirname(this.path), 'r'); try { await dir.sync(); } finally { await dir.close(); } }
+      if (this.journal.length) await this.compactJournal(covered);
     });
-    return this.write;
   }
 }
 
@@ -127,7 +255,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * break the provider may have accepted the paid request, so the job becomes uncertain.
  */
 export class FalJobService {
-  constructor({ store, provider, now = () => Date.now(), sleepFn = sleep, maxPollRetries = 3, pollDelayMs = 1200, maxActive = 2, modelLimits = {}, pollTimeoutMs = 540000, queueKey = null, maxQueueBytes = 128 * 1024 * 1024, requireAccountOwnership = false, legacyGuard } = {}) {
+  constructor({ store, provider, now = () => Date.now(), sleepFn = sleep, maxPollRetries = 3, pollDelayMs = 1200, maxActive = 2, modelLimits = {}, pollTimeoutMs = 540000, queueKey = null, maxQueueBytes = 128 * 1024 * 1024, requireAccountOwnership = false, legacyGuard, persistRetryMs = 1000, persistRetryMaxMs = 60000 } = {}) {
     if (!store || !provider) throw new TypeError("store and provider are required");
     this.store = store;
     this.provider = provider;
@@ -143,6 +271,54 @@ export class FalJobService {
     this.maxQueueBytes = maxQueueBytes;
     this.recovery = new Set();
     this.stopped = false; this.requireAccountOwnership = requireAccountOwnership; this.legacyGuard = legacyGuard;
+    // Storage health: while the last snapshot write failed, no new paid work is admitted or dispatched.
+    this.storageError = null;
+    this.persistRetryMs = persistRetryMs; this.persistRetryMaxMs = persistRetryMaxMs; this.persistRetryTimer = null; this.persistRetryDelay = persistRetryMs;
+    if ('journalCipher' in store) store.journalCipher = this.cipher;
+  }
+
+  get storageHealthy() { return this.storageError === null; }
+
+  /**
+   * Writes the snapshot. `required` writes (markers that must be durable BEFORE a paid submit or a cancel) throw on
+   * failure; best-effort writes keep the in-memory state, mark storage unhealthy and schedule a retry.
+   */
+  async persist({ required = false } = {}) {
+    try {
+      await this.store.flush();
+    } catch (error) {
+      this.storageError = error;
+      this.armPersistRetry();
+      if (required) throw Object.assign(new Error('job_store_unavailable'), { status: 503, cause: error });
+      return false;
+    }
+    const wasUnhealthy = this.storageError !== null;
+    this.storageError = null;
+    this.persistRetryDelay = this.persistRetryMs;
+    if (this.persistRetryTimer) { clearTimeout(this.persistRetryTimer); this.persistRetryTimer = null; }
+    if (wasUnhealthy) {
+      for (const job of this.store.jobs.values()) if (job.error?.code === 'persist_failed_after_accept' && !TERMINAL_JOB_STATUSES.has(job.status)) job.error = null;
+      this.schedule();
+    }
+    return true;
+  }
+
+  armPersistRetry() {
+    if (this.persistRetryTimer || this.stopped) return;
+    const delay = this.persistRetryDelay;
+    this.persistRetryDelay = Math.min(this.persistRetryDelay * 2, this.persistRetryMaxMs);
+    this.persistRetryTimer = setTimeout(() => { this.persistRetryTimer = null; void this.retryPersistence(); }, delay);
+    this.persistRetryTimer.unref?.();
+  }
+
+  /** Re-attempts the snapshot (also called by the retry timer). Resolves true once storage is healthy again. */
+  async retryPersistence() { return this.storageHealthy || this.persist(); }
+
+  /** New paid work requires healthy storage; one fresh attempt is made before refusing. */
+  async requireHealthyStorage() {
+    await this.store.settled();
+    if (this.storageHealthy) return;
+    if (!(await this.persist())) throw Object.assign(new Error('job_store_unavailable'), { status: 503 });
   }
 
   async init() {
@@ -150,9 +326,10 @@ export class FalJobService {
       if (this.requireAccountOwnership && [...this.store.jobs.values()].some(j => j.ownershipVersion !== 'account-v1')) throw new Error('Legacy tasks require quarantine');
       for (const j of this.store.jobs.values()) if (j.durableQueue && j.status === 'recoverable' && j.providerJobId && j.sealed) this.recovery.add(j.id);
       this.schedule();
-    });
+    }).catch((error) => { this.initializing = null; throw error; });
     await this.initializing;
-    await this.store.cleanup();
+    // cleanup restores records on a failed write; reads and query-only recovery must keep working.
+    await this.store.cleanup().catch((error) => { this.storageError = error; this.armPersistRetry(); });
   }
 
   context(j) { return JSON.stringify(['fal', 'https://queue.fal.run', j.id, j.owner, j.key, j.model]); }
@@ -165,7 +342,8 @@ export class FalJobService {
       if (this.stopped) return;
       for (const j of this.store.jobs.values()) {
         const recovery = this.recovery.has(j.id) && j.status === 'recoverable' && j.providerJobId;
-        const waiting = j.durableQueue && j.status === 'queued' && j.queueState === 'waiting' && !j.providerJobId;
+        // Query-only recovery may run on unhealthy storage; a new paid submission may not.
+        const waiting = this.storageHealthy && j.durableQueue && j.status === 'queued' && j.queueState === 'waiting' && !j.providerJobId;
         if ((!recovery && !waiting) || !j.sealed || this.workers.has(j.id)) continue;
         try { if (!this.limits.acquire(j.id, j.model)) continue; }
         catch (error) { if (error.status === 429) continue; this.stopped = true; return; }
@@ -178,8 +356,18 @@ export class FalJobService {
     });
   }
 
+  /** A dispatch whose marker never became durable goes back to the waiting queue; nothing was submitted. */
+  returnToWaiting(j, sealed) {
+    j.sealed = sealed; j.status = 'queued'; j.stage = 'waiting'; j.queueState = 'waiting'; delete j.startedAt; j.updatedAt = this.now();
+  }
+
   async dispatch(j, recovery) {
-    await this.store.flush();
+    const original = j.sealed;
+    if (recovery) await this.persist();
+    else {
+      try { await this.persist({ required: true }); }
+      catch { this.returnToWaiting(j, original); return; }
+    }
     let data;
     try {
       data = this.cipher.open(j.sealed, this.context(j));
@@ -192,7 +380,8 @@ export class FalJobService {
     if (recovery) { await this.poll(j, data.credential); return; }
     // Drop image/input data before network, retain only encrypted query credentials.
     j.sealed = this.cipher.seal({ credential: data.credential }, this.context(j));
-    await this.store.flush();
+    try { await this.persist({ required: true }); }
+    catch { this.returnToWaiting(j, original); return; }
     await this.run(j.id, data.credential, data.payload);
   }
 
@@ -210,13 +399,25 @@ export class FalJobService {
     const owner = ownerHash(credential);
     const key = `${owner}:${model}:${idempotencyKey}`;
     const bodyHash = fingerprint(payload);
-    const existing = [...this.store.jobs.values()].find((job) => job.key === key);
-    if (existing) {
-      if (existing.bodyHash !== bodyHash) { const error = new Error("idempotency key was reused with different input"); error.status = 409; throw error; }
-      await this.store.write;
-      return publicJob(existing);
-    }
+    const findExisting = () => {
+      const found = [...this.store.jobs.values()].find((job) => job.key === key);
+      if (found && found.bodyHash !== bodyHash) { const error = new Error("idempotency key was reused with different input"); error.status = 409; throw error; }
+      return found;
+    };
+    // A joined job must still be stored after the pending write: its admission may have failed and been dropped.
+    const joined = async (job) => {
+      await this.store.settled();
+      if (this.store.jobs.get(job.id) !== job) throw Object.assign(new Error('job_store_unavailable'), { status: 503 });
+      return publicJob(job);
+    };
+    const existing = findExisting();
+    if (existing) return joined(existing);
     this.legacyGuard?.(credential, idempotencyKey, model);
+    await this.requireHealthyStorage();
+    // Idempotency is re-checked after the last await: everything from here to the insertion below is synchronous,
+    // so concurrent identical requests that waited for storage join the job the first one admitted.
+    const admitted = findExisting();
+    if (admitted) return joined(admitted);
     const now = this.now();
     const job = { id: randomUUID(), ownershipVersion: ownershipVersion(credential), key, owner, model, bodyHash, status: "queued", createdAt: now, updatedAt: now };
     if (this.store.jobs.size >= 1000) throw Object.assign(new Error('job_capacity'), { status: 429 });
@@ -227,12 +428,13 @@ export class FalJobService {
       const bytes = [...this.store.jobs.values()].reduce((n, j) => n + (j.sealed?.data.length || 0), job.sealed.data.length);
       if (bytes > this.maxQueueBytes) throw Object.assign(new Error('queue_bytes_capacity'), { status: 429 });
       this.store.jobs.set(job.id, job);
-      try { await this.store.flush(); } catch (error) { this.stopped = true; throw error; }
+      // Not durable means not admitted: forget it (nothing was submitted) and refuse.
+      try { await this.persist({ required: true }); } catch (error) { this.store.jobs.delete(job.id); throw error; }
       this.schedule(); return publicJob(job);
     }
     this.limits.acquire(job.id, model);
     this.store.jobs.set(job.id, job);
-    try { await this.store.flush(); } catch (error) { this.limits.release(job.id); throw error; }
+    try { await this.persist({ required: true }); } catch (error) { this.store.jobs.delete(job.id); this.limits.release(job.id); throw error; }
     // Keep payload and credential process-local only; neither is persisted.
     this.track(job, () => this.run(job.id, credential, payload));
     return publicJob(job);
@@ -254,8 +456,11 @@ export class FalJobService {
     const job = this.store.jobs.get(jobId);
     if (!job || job.owner !== ownerHash(credential)) { const error = new Error("job not found"); error.status = 404; throw error; }
     if (job.durableQueue && job.queueState === 'waiting' && job.status === 'queued' && !job.providerJobId) {
+      // A cancel that is not durable could be replayed as a paid submit after restart: it must be saved or refused.
       job.queueState = 'canceled';
-      await this.update(job, 'canceled'); return publicJob(job);
+      try { await this.update(job, 'canceled', 'canceled', { required: true }); }
+      catch (error) { job.queueState = 'waiting'; throw error; }
+      return publicJob(job);
     }
     if (TERMINAL_JOB_STATUSES.has(job.status) || !job.providerJobId) throw Object.assign(new Error('not_cancelable'), { status: 409 });
     if (job.cancelRequested) return publicJob(job);
@@ -264,9 +469,9 @@ export class FalJobService {
     catch {
       job.cancelRequested = false;
       if (!TERMINAL_JOB_STATUSES.has(job.status)) job.error = { code: 'cancel_unconfirmed', message: 'Cancellation was not confirmed; query the existing job.' };
-      await this.store.flush(); return publicJob(job);
+      await this.persist(); return publicJob(job);
     }
-    if (!TERMINAL_JOB_STATUSES.has(job.status)) { job.stage = 'cancel_requested'; job.updatedAt = this.now(); await this.store.flush(); }
+    if (!TERMINAL_JOB_STATUSES.has(job.status)) { job.stage = 'cancel_requested'; job.updatedAt = this.now(); await this.persist(); }
     // A successful cancel HTTP response is a request acknowledgement, not a final state.
     return publicJob(job);
   }
@@ -282,7 +487,8 @@ export class FalJobService {
     job.status = "running";
     job.stage = 'querying_provider'; job.error = null;
     job.updatedAt = this.now();
-    const work = this.track(job, async () => { await this.store.flush(); await this.poll(job, credential); });
+    // Query-only: unhealthy storage does not block it, it only stays unsaved until storage recovers.
+    const work = this.track(job, async () => { await this.persist(); await this.poll(job, credential); });
     return background ? publicJob(job) : work;
   }
 
@@ -290,8 +496,10 @@ export class FalJobService {
     const work = Promise.resolve().then(operation).catch(() => {
       this.stopped = true;
       if (!TERMINAL_JOB_STATUSES.has(job.status)) {
-        job.status = 'uncertain'; job.stage = 'uncertain'; job.finishedAt = this.now();
-        job.error = { code: 'worker_failed', message: 'Task outcome cannot be confirmed.' };
+        // A known provider id always stays query-recoverable; only an unknown outcome is uncertain.
+        if (job.providerJobId) { job.status = 'recoverable'; job.stage = 'recoverable'; }
+        else { job.status = 'uncertain'; job.stage = 'uncertain'; job.finishedAt = this.now(); }
+        job.error = { code: 'worker_failed', message: job.providerJobId ? 'Worker stopped; query the existing provider job.' : 'Task outcome cannot be confirmed.' };
       }
     }).finally(() => { this.workers.delete(job.id); this.limits.release(job.id); this.schedule(); });
     this.workers.set(job.id, work); return work;
@@ -300,34 +508,58 @@ export class FalJobService {
   async waitForIdle() {
     do { await new Promise(resolve => setImmediate(resolve)); await Promise.all([...this.workers.values()]); }
     while (this.workers.size || this.scheduled);
-    await this.store.write;
+    await this.store.settled();
   }
 
-  async update(job, status, stage = status) {
+  async update(job, status, stage = status, { required = false } = {}) {
     if (TERMINAL_JOB_STATUSES.has(job.status)) return;
+    const previous = { status: job.status, stage: job.stage, updatedAt: job.updatedAt, finishedAt: job.finishedAt, sealed: job.sealed };
     job.status = status; job.stage = stage; job.updatedAt = this.now();
     if (TERMINAL_JOB_STATUSES.has(status)) { job.finishedAt = job.updatedAt; delete job.sealed; }
-    try { await this.store.flush(); } catch (error) { this.stopped = true; throw error; }
+    try { await this.persist({ required }); }
+    catch (error) {
+      // A required transition that is not durable did not happen.
+      Object.assign(job, previous);
+      if (previous.finishedAt === undefined) delete job.finishedAt;
+      if (previous.sealed === undefined) delete job.sealed;
+      throw error;
+    }
   }
 
   async run(jobId, credential, payload) {
     const job = this.store.jobs.get(jobId);
     if (!job || job.providerJobId || !(job.status === 'queued' || (job.durableQueue && job.queueState === 'submitting' && job.status === 'running'))) return;
+    job.startedAt = this.now();
+    // Durable jobs already saved their submission marker in dispatch(). A direct job is never replayed after a
+    // restart, but it is still not submitted while storage is failing.
+    try { await this.update(job, 'running', 'submitting', { required: !job.durableQueue }); }
+    catch {
+      job.error = { code: 'storage_unavailable', message: 'Local job storage is unavailable; nothing was submitted.' };
+      job.status = 'failed'; job.stage = 'failed'; job.finishedAt = job.updatedAt = this.now();
+      return publicJob(job);
+    }
+    let submitted;
     try {
-      job.startedAt = this.now(); await this.update(job, 'running', 'submitting');
-      const submitted = await this.provider.submit(job.model, payload, providerCredential(credential));
-      if (!submitted || typeof submitted.request_id !== "string" || !/^[A-Za-z0-9_-]{1,100}$/.test(submitted.request_id)) {
-        return this.fail(job, "submit_uncertain", "provider returned an invalid job id");
-      }
-      job.providerJobId = submitted.request_id;
-      job.status = "running";
-      job.updatedAt = this.now();
-      await this.store.flush();
-      await this.poll(job, credential);
-    } catch (error) {
+      submitted = await this.provider.submit(job.model, payload, providerCredential(credential));
+    } catch {
       // A submit transport error is ambiguous: do not issue a second paid submit.
       return this.fail(job, "submit_uncertain", "provider acceptance is uncertain");
     }
+    if (!submitted || typeof submitted.request_id !== "string" || !/^[A-Za-z0-9_-]{1,100}$/.test(submitted.request_id)) {
+      return this.fail(job, "submit_uncertain", "provider returned an invalid job id");
+    }
+    // From here on the provider job id is known: every path is query-only.
+    job.providerJobId = submitted.request_id;
+    job.status = "running"; job.stage = 'submitted';
+    job.updatedAt = this.now();
+    if (!(await this.persist())) {
+      const journaled = await this.store.recordAccepted?.(job.id, job.providerJobId).then(() => true, () => false);
+      job.error = journaled
+        ? { code: 'persist_failed_after_accept', message: 'Provider accepted the task; the job list could not be saved, the provider id is journaled. Query the existing job; it will not be resubmitted.' }
+        : { code: 'persist_failed_after_accept', durability: 'memory_only', message: 'Provider accepted the task, but nothing could be saved: the provider id exists only in this process and is lost if the relay restarts before storage recovers. Query the existing job now; it will not be resubmitted.' };
+    }
+    try { await this.poll(job, credential); }
+    catch { await this.fail(job, 'poll_failed', 'provider polling failed'); }
   }
 
   async poll(job, credential) {
@@ -366,7 +598,9 @@ export class FalJobService {
 
   async fail(job, code, message) {
     if (TERMINAL_JOB_STATUSES.has(job.status)) return publicJob(job);
-    const recover = !!job.providerJobId && ['status_unavailable', 'result_unavailable', 'result_failed', 'poll_failed'].includes(code);
+    // A known provider id is never downgraded to "uncertain": it stays query-recoverable unless the provider
+    // itself reported failure.
+    const recover = !!job.providerJobId && code !== 'provider_failed';
     job.error = { code, message };
     await this.update(job, recover ? 'recoverable' : code === 'submit_uncertain' ? 'uncertain' : 'failed');
     return publicJob(job);

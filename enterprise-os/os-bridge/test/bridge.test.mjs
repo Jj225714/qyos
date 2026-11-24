@@ -269,7 +269,8 @@ test('internal API: separate listener, token, config, identity, Casdoor-aware st
     assert.equal((await fetch(`${s.internal.url}/internal/config`)).status, 401);
     assert.deepEqual(await (await internal('/internal/config')).json(), { instance: 'japi-prod', loginProvider: { type: 'lark', name: 'provider_lark' } });
     const me = await (await internal('/internal/me?key=1', { authorization: `Bearer ${s.signer.token(alice)}` })).json();
-    assert.deepEqual(me, { user: { id: 1, email: 'alice@acme.cn', status: 'active' }, instance: 'japi-prod' });
+    // SSO-20261115-05: additive display fields for the portal (never a key).
+    assert.deepEqual(me, { user: { id: 1, email: 'alice@acme.cn', status: 'active' }, instance: 'japi-prod', casdoorId: 'cas-1', name: '张三', department: 'sales' });
     assert.equal((await (await internal('/internal/users/1')).json()).user.status, 'active');
     const key = await (await internal('/internal/users/1/key')).json();
     assert.match(key.apiKey, /^sk-user1-/);
@@ -287,6 +288,9 @@ test('internal key lookup: only os-bridge-managed, active keys; never creates a 
     s.japi.state.users.push({ id: 2, email: 'new@acme.cn', notes: 'os-bridge casdoor:cas-9', status: 'active' });
     s.japi.state.users.push({ id: 3, email: 'old@acme.cn', notes: 'os-bridge casdoor:cas-8', status: 'active' });
     s.japi.state.keys.push({ id: 1, user_id: 3, key: 'sk-old', name: 'enterprise-os', status: 'quota_exhausted' });
+    // SSO-20261115-05: the key route now also requires the bound person to be an active Casdoor user in a department.
+    s.person({ name: 'new', id: 'cas-9', email: 'new@acme.cn' });
+    s.person({ name: 'old', id: 'cas-8', email: 'old@acme.cn' });
     assert.equal((await (await key(1)).json()).error.code, 'NOT_MANAGED');
     assert.equal((await key(2)).status, 404);
     assert.equal((await (await key(3)).json()).error.code, 'KEY_DISABLED');

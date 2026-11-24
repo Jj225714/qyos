@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto';
 import { mkdir, open, opendir, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -7,12 +7,46 @@ import { createSettingsService } from './settings.mjs';
 import { createAssetService } from './asset-service.mjs';
 import { createMembershipService } from './membership-service.mjs';
 import { createEnterpriseSso, OIDC_COOKIE, OIDC_STATE_DIR, STATE_MS } from './enterprise-sso.mjs';
+import { createManagedImage, imageGenerationError, MANAGED_IMAGE_BODY_LIMIT, validSubject, validateReference } from './managed-image.mjs';
+import { sharedImageProvider } from './shared-image-provider.mjs';
+import { createCanvasChat, CANVAS_CHAT_BODY_LIMIT } from './canvas-chat.mjs';
+import { createImageModelControl, imageModelHttpHandler, imageModelSocketFd, writeImageModelOverride } from './image-model-control.mjs';
 
 const PREFIX = '/api/config-vault';
+const IMAGE_BATCH_ROUTE = `${PREFIX}/managed-image/batch`;
+const IMAGE_STREAM_DRAIN_TIMEOUT_MS = 15_000;
+
+function imageBatchStream(res) {
+    const canContinue = () => !res.destroyed && !res.writableEnded && !res.socket?.destroyed;
+    return {
+        canContinue,
+        async write(record) {
+            if (!canContinue()) return false;
+            if (!res.headersSent) {
+                res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+                res.setHeader('Cache-Control', 'no-store');
+                res.setHeader('X-Accel-Buffering', 'no');
+            }
+            if (res.write(`${JSON.stringify(record)}\n`)) return canContinue();
+            return new Promise(resolve => {
+                const finish = ready => {
+                    clearTimeout(timer);
+                    res.off('drain', drain).off('close', close).off('error', close);
+                    resolve(ready);
+                };
+                const drain = () => finish(canContinue());
+                const close = () => finish(false);
+                const timer = setTimeout(() => { finish(false); res.destroy(); }, IMAGE_STREAM_DRAIN_TIMEOUT_MS);
+                res.once('drain', drain).once('close', close).once('error', close);
+                if (!canContinue()) close();
+            });
+        },
+    };
+}
 const COOKIE = '__Secure-config_vault';
 const TASK_COOKIE = '__Secure-provider_tasks';
 const SESSION_MS = 7 * 86400000;
-/** Fixed id of the enterprise-managed channel; it carries a per-employee key and is never stored in personal settings. */
+/** Legacy managed channel id must never be persisted with personal settings. */
 export const MANAGED_CHANNEL_ID = 'managed-enterprise';
 /** Upper bound of pending-login records examined per cleanup pass. */
 const OIDC_PRUNE_SCAN = 1000;
@@ -76,7 +110,7 @@ function cleanConfig(value) {
     return config;
 }
 
-export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchImpl = fetch, adminUsersFile, publicRulesDir, assetQuotaBytes, enterpriseSso, ssoRecheckMs = 60000, oidcPruneIntervalMs = 60000 }) {
+export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchImpl = fetch, adminUsersFile, publicRulesDir, assetQuotaBytes, enterpriseSso, managedImage, imageModelControl, imageAdapter, imageCapabilityPolicy, ssoRecheckMs = 60000, oidcPruneIntervalMs = 60000 }) {
     const expected = new URL(origin);
     if (expected.origin !== origin || key.length !== 32) throw new Error('Invalid settings');
     const sso = enterpriseSso ? createEnterpriseSso({ origin, prefix: PREFIX, fetchImpl, ...enterpriseSso }) : null;
@@ -84,6 +118,13 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
     const rates = new Map();
     const path = name => join(storeDir, `${name}.enc`);
     const read = async name => { try { return decrypt(await readFile(path(name), 'utf8'), key); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
+    const imageLease = subject => `internal-image-generation/${hash(subject)}`;
+    const image = createManagedImage({ config: managedImage, fetchImpl, getModel: imageModelControl?.currentModel, adapter: imageAdapter, routeVerified: imageModelControl?.verified, capabilityPolicy: imageCapabilityPolicy, writeReceipt: (id, value) => writeEncrypted(path(`internal-image-usage/${id}`), value, key),
+        readGeneration: subject => read(imageLease(subject)),
+        writeGeneration: (subject, value) => writeEncrypted(path(imageLease(subject)), value, key),
+        clearGeneration: subject => unlink(path(imageLease(subject))),
+    });
+    const canvasChat = image && imageAdapter?.chat ? createCanvasChat(imageAdapter.chat) : null;
     async function locked(name, work) {
         const previous = locks.get(name) || Promise.resolve();
         const current = previous.catch(() => {}).then(work);
@@ -129,13 +170,13 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
     }
     // SSO sessions hold no JAPI tokens: identity is re-checked against JAPI through os-bridge.
     // They also have an absolute lifetime (sessionMaxHours), after which enterprise login is required again.
-    async function createSsoSession(rawUser, req, res, extraCookies) {
+    async function createSsoSession(rawUser, casdoorId, req, res, extraCookies) {
         const user = validUser(rawUser);
         await revokePresented(req);
         const id = randomBytes(32).toString('base64url');
         const createdAt = Date.now();
         const lifetime = Math.min(SESSION_MS, sso.sessionMs);
-        await writeEncrypted(path(`session-${hash(id)}`), { kind: 'sso', user, createdAt, expiresAt: createdAt + lifetime, checkedAt: createdAt }, key);
+        await writeEncrypted(path(`session-${hash(id)}`), { kind: 'sso', user, casdoorId: validSubject(casdoorId), createdAt, expiresAt: createdAt + lifetime, checkedAt: createdAt }, key);
         setSessionCookie(res, id, Math.floor(lifetime / 1000));
         res.setHeader('Set-Cookie', [...res.getHeader('Set-Cookie'), ...extraCookies]);
         return user;
@@ -146,7 +187,7 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
         const id = ids.length === 1 ? ids[0] : null;
         return id && /^[A-Za-z0-9_-]{43}$/.test(id) ? `session-${hash(id)}` : null;
     }
-    async function authenticate(req) {
+    async function authenticate(req, liveImageIdentity = false) {
         const name = sessionName(req);
         if (!name) throw fault(401);
         return locked(name, async () => {
@@ -158,13 +199,19 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
                     if (!sso) throw fault(401);
                     // Also enforces a lowered sessionMaxHours on sessions issued before the change.
                     if (!Number.isFinite(session.createdAt) || session.createdAt + sso.sessionMs <= Date.now()) throw fault(401);
-                    if (session.checkedAt + ssoRecheckMs <= Date.now()) {
+                    if (liveImageIdentity) {
+                        // For paid requests, re-check the exact account and immutable binding every time.
+                        const current = await sso.imageIdentityStatus(session.user.id);
+                        const currentUser = validUser(current.user);
+                        const subject = validSubject(session.casdoorId);
+                        if (!subject || validSubject(current.casdoorId) !== subject || String(currentUser.id) !== String(session.user.id)) throw fault(403);
+                    } else if (session.checkedAt + ssoRecheckMs <= Date.now()) {
                         const current = validUser(await sso.status(session.user.id));
                         if (String(current.id) !== String(session.user.id) || current.email.toLowerCase() !== session.user.email.toLowerCase()) throw fault(401);
                         session.checkedAt = Date.now();
                         await writeEncrypted(path(name), session, key);
                     }
-                    return { user: session.user, name, expiresAt: session.expiresAt, sso: true };
+                    return { user: session.user, name, expiresAt: session.expiresAt, sso: true, casdoorId: session.casdoorId };
                 }
                 let refreshed = false;
                 async function refresh() {
@@ -249,8 +296,10 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
                 const cookieState = (req.headers.cookie || '').split(';').map(v => v.trim()).find(v => v.startsWith(`${OIDC_COOKIE}=`))?.slice(OIDC_COOKIE.length + 1);
                 try {
                     const result = await sso.finish({ query: url.searchParams, cookieState, consume: name => locked(name, async () => { const value = await read(name); await unlink(path(name)).catch(() => {}); return value; }) });
-                    await createSsoSession(result.user, req, res, [clearState]);
-                    return redirect(result.returnTo);
+                    await createSsoSession(result.user, result.casdoorId, req, res, [clearState]);
+                    // The homepage launches /image. Also guide older clients that only recognize the explicit pilot URL.
+                    const imageEntry = result.returnTo === '/image' && image?.enrolled({ ...result, sso: true });
+                    return redirect(imageEntry ? '/image?enterprisePilot=1' : result.returnTo);
                 } catch (error) {
                     return redirect(`/#server-config-sso=${error.status === 503 ? 'unavailable' : 'failed'}`, [clearState]);
                 }
@@ -283,7 +332,52 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
             if (presentedIds(req).length > 1) { setSessionCookie(res, '', 0); throw fault(401); }
             // The task-cookie name is an identity-check transport, not another public vault API.
             if (req.headers.cookie?.split(';').some(v => v.trim().startsWith(`${TASK_COOKIE}=`)) && !(req.method === 'GET' && route === `${PREFIX}/session`)) throw fault(401);
-            const session = await authenticate(req);
+            const canvasRoute = route === `${PREFIX}/canvas-chat`;
+            const reverseRoute = route === `${PREFIX}/managed-image/reverse-prompt`;
+            const generationStatusRoute = route === `${PREFIX}/managed-image/status`;
+            const imageRoute = canvasRoute || reverseRoute || generationStatusRoute || route === IMAGE_BATCH_ROUTE || route === `${PREFIX}/managed-image` || route === `${PREFIX}/managed-image/generate`;
+            const session = await authenticate(req, imageRoute && !generationStatusRoute && Boolean(image));
+            if (imageRoute) {
+                if (!image) throw fault(404);
+                if (!session.sso || req.headers['x-config-user'] !== String(session.user.id)) throw fault(403);
+                if (reverseRoute) {
+                    if (req.method !== 'POST') throw fault(405);
+                    if (!image.enrolled(session)) throw fault(403);
+                    if (!imageAdapter?.reversePrompt) throw fault(503);
+                    const input = await body(req, 5_600_000);
+                    if (!plain(input) || Object.keys(input).length !== 1 || !Object.hasOwn(input, 'image')) throw fault(400);
+                    const reference = validateReference(input.image);
+                    try {
+                        const res = await imageAdapter.reversePrompt({ image: reference });
+                        if (!res.ok) {
+                            await res.body?.cancel();
+                            throw fault([429, 503, 504].includes(res.status) ? res.status : 502);
+                        }
+                        const { text } = await res.json();
+                        if (typeof text !== 'string' || !text.trim() || text.length > 6000) throw fault(502);
+                        return send({ text: text.trim() });
+                    } catch (err) {
+                        throw fault([429, 503, 504].includes(err.status) ? err.status : err.name === 'AbortError' ? 504 : 502);
+                    }
+                }
+                if (canvasRoute) {
+                    if (req.method !== 'POST') throw fault(405);
+                    if (!image.enrolled(session)) throw fault(403);
+                    if (!canvasChat) throw fault(503);
+                    return send(await canvasChat(String(session.user.id), await body(req, CANVAS_CHAT_BODY_LIMIT)));
+                }
+                if (route === `${PREFIX}/managed-image` && req.method === 'GET') return send(await image.describe(session));
+                if (generationStatusRoute && req.method === 'GET') return send(await image.generationStatus(session));
+                if (route === `${PREFIX}/managed-image/generate` && req.method === 'POST') return send(await image.generate(session, await body(req, MANAGED_IMAGE_BODY_LIMIT)));
+                if (route === IMAGE_BATCH_ROUTE && req.method === 'POST') {
+                    const input = await body(req, MANAGED_IMAGE_BODY_LIMIT);
+                    const stream = imageBatchStream(res);
+                    await image.generateBatch(session, input, stream);
+                    if (stream.canContinue()) res.end();
+                    return;
+                }
+                throw fault(405);
+            }
             // Also migrate existing sessions after live /auth/me validation; do not extend expiry.
             setSessionCookie(res, presentedIds(req)[0], Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000)));
             if (route === `${PREFIX}/memberships` || route.startsWith(`${PREFIX}/memberships/`) || route.startsWith(`${PREFIX}/memberships?`)) {
@@ -298,11 +392,11 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
                     return assets.handle(req, res, session, send);
                 });
             }
-            if (req.method === 'GET' && route === `${PREFIX}/session`) return send({ user: session.sso ? { ...session.user, managed: true } : session.user });
-            if (req.method === 'GET' && route === `${PREFIX}/managed-channel`) {
-                if (!session.sso || !sso) throw fault(404);
-                return send(await sso.channelFile(session.user.id));
+            if (req.method === 'GET' && route === `${PREFIX}/session`) {
+                return send({ user: session.sso ? { ...session.user, managed: true, ...(image?.enrolled(session) ? { managedImage: true } : {}) } : session.user });
             }
+            // Do not request an employee key or return any channel credential to the browser.
+            if (route === `${PREFIX}/managed-channel`) throw fault(404);
             if (route.startsWith(`${PREFIX}/settings`) || route.startsWith(`${PREFIX}/assets`)) {
                 return await settings.handle(req, res, session, send);
             }
@@ -325,11 +419,23 @@ export function createVaultHandler({ origin, authBaseUrl, storeDir, key, fetchIm
                 }));
             }
             throw fault(404);
-        } catch (error) { if (!res.writableEnded) { res.statusCode = error.status || 500; send({ error: res.statusCode === 409 ? 'Configuration conflict' : res.statusCode === 422 ? error.message : 'Request failed' }); } }
+        } catch (error) {
+            if (res.writableEnded || res.destroyed) return;
+            if (res.headersSent) { res.destroy(); return; }
+            res.statusCode = error.status || 500;
+            const generationRoute = req.url === IMAGE_BATCH_ROUTE || req.url === `${PREFIX}/managed-image/generate` || req.url === `${PREFIX}/managed-image/status`;
+            if (generationRoute && error.imageError) {
+                const result = imageGenerationError(error);
+                if (result.retryAfterSeconds) res.setHeader('Retry-After', String(result.retryAfterSeconds));
+                return send(result);
+            }
+            send({ error: res.statusCode === 409 ? 'Configuration conflict' : res.statusCode === 422 ? error.message : 'Request failed' });
+        }
     };
     // For tests and maintenance: the startup cleanup pass, and a manual trigger.
     handler.oidcPruned = oidcPruned;
     handler.pruneOidcStates = pruneOidcStates;
+    handler.probeManagedImage = image?.probe;
     return handler;
 }
 
@@ -337,10 +443,48 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const args = Object.fromEntries(Array.from({ length: Math.floor((process.argv.length - 2) / 2) }, (_, index) => process.argv.slice(index * 2 + 2, index * 2 + 4)));
     const key = await readFile(args['--key-file']);
     // Optional enterprise SSO (Casdoor + os-bridge): enabled only when --sso-config is given.
-    const enterpriseSso = args['--sso-config'] ? await (async () => {
-        const config = JSON.parse(await readFile(args['--sso-config'], 'utf8'));
-        const secret = file => readFile(file, 'utf8').then(v => v.trim());
+    const config = args['--sso-config'] ? JSON.parse(await readFile(args['--sso-config'], 'utf8')) : null;
+    const secret = file => readFile(file, 'utf8').then(v => v.trim());
+    const enterpriseSso = config ? await (async () => {
         return { oidc: { ...config.oidc, clientSecret: await secret(config.oidc.clientSecretFile) }, bridge: { baseUrl: config.bridge.baseUrl, japiInstance: config.bridge.japiInstance, token: await secret(config.bridge.tokenFile) }, managedChannel: config.managedChannel, sessionMaxHours: config.sessionMaxHours };
     })() : undefined;
-    createServer(createVaultHandler({ origin: args['--origin'], authBaseUrl: args['--auth-base'], storeDir: args['--store'], key, adminUsersFile: args['--admin-users-file'], publicRulesDir: args['--public-rules-dir'], enterpriseSso })).listen(Number(args['--port'] || 3183), '127.0.0.1');
+    const managedImage = config?.managedImage?.enabled ? { ...config.managedImage, accessMode: 'all-employees', apiKey: await secret(config.managedImage.apiKeyFile) } : undefined;
+    const imageAdapter = managedImage && process.env.QYOS_SHARED_IMAGE_SOCKET ? sharedImageProvider(process.env.QYOS_SHARED_IMAGE_SOCKET) : undefined;
+    const adminFd = imageModelSocketFd();
+    let imageCapabilityPolicy;
+    if (imageAdapter) {
+        const policyFile = join(args['--store'], 'shared-image-capabilities.json');
+        try {
+            const file = await open(policyFile, 'r');
+            try {
+                const info = await file.stat();
+                if (info.isFile() && info.size <= 4096) imageCapabilityPolicy = JSON.parse(await file.readFile('utf8'));
+            } finally { await file.close(); }
+        } catch (error) {
+            if (error.code !== 'ENOENT') console.error('[config-vault] Image capability policy unavailable');
+        }
+    }
+    const modelStatePath = join(args['--store'], imageAdapter ? 'shared-image-model-state.enc' : 'managed-image-model-state.enc');
+    let handler;
+    const imageModelControl = managedImage ? await createImageModelControl({
+        defaultModel: managedImage.model,
+        routeEpoch: createHmac('sha256', key).update(JSON.stringify(['qyos.image-route.v1', managedImage.endpoint, managedImage.apiKey, managedImage.model, managedImage.quality, managedImage.size])).digest('hex'),
+        getRouteEpoch: imageAdapter?.epoch,
+        load: async () => {
+            try { return decrypt(await readFile(modelStatePath, 'utf8'), key); }
+            catch (error) {
+                if (error.code !== 'ENOENT') throw error;
+                if (imageAdapter) {
+                    try { return decrypt(await readFile(join(args['--store'], 'managed-image-model-state.enc'), 'utf8'), key); }
+                    catch (legacy) { if (legacy.code !== 'ENOENT') throw legacy; }
+                }
+                return null;
+            }
+        },
+        save: next => writeImageModelOverride(modelStatePath, encrypt(next, key), () => console.error('[config-vault] Image model directory sync failed after commit')),
+        probe: (model, epoch) => handler.probeManagedImage(model, epoch),
+    }) : null;
+    handler = createVaultHandler({ origin: args['--origin'], authBaseUrl: args['--auth-base'], storeDir: args['--store'], key, adminUsersFile: args['--admin-users-file'], publicRulesDir: args['--public-rules-dir'], enterpriseSso, managedImage, imageModelControl, imageAdapter, imageCapabilityPolicy });
+    if (adminFd !== null) createServer({ headersTimeout: 5000, requestTimeout: 5000, maxHeaderSize: 8192 }, imageModelHttpHandler(imageModelControl)).listen({ fd: adminFd });
+    createServer(handler).listen(Number(args['--port'] || 3183), '127.0.0.1');
 }

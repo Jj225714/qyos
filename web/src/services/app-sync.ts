@@ -391,10 +391,18 @@ function fileExtension(mimeType: string, storageKey: string) {
     return storageKey.startsWith("image:") ? "png" : "bin";
 }
 
-function waitForHydration<T extends { hydrated: boolean }>(store: { getState: () => T; subscribe: (listener: (state: T) => void) => () => void }) {
+/** Resolves once the store read its saved data; rejects if that read failed (sync must not merge into defaults). */
+export function waitForHydration<T extends { hydrated: boolean; hydrationStatus?: string }>(store: { getState: () => T; subscribe: (listener: (state: T) => void) => () => void }) {
+    const failed = () => new Error("本地数据读取失败，同步已停止；请先在对应页面点击“重试读取”");
     if (store.getState().hydrated) return Promise.resolve();
-    return new Promise<void>((resolve) => {
+    if (store.getState().hydrationStatus === "error") return Promise.reject(failed());
+    return new Promise<void>((resolve, reject) => {
         const unsubscribe = store.subscribe((state) => {
+            if (state.hydrationStatus === "error") {
+                unsubscribe();
+                reject(failed());
+                return;
+            }
             if (!state.hydrated) return;
             unsubscribe();
             resolve();

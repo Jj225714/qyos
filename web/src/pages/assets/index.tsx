@@ -4,9 +4,10 @@ import { AssetsWorkspace } from "./library-page";
 import { Link } from "react-router-dom";
 import { Copy, Download, PencilLine, Search, Trash2, Upload } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
+import { Alert, App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
+import { StoreHydrationAlert } from "@/components/storage/store-hydration-alert";
 
 import { useCopyText } from "@/hooks/use-copy-text";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
@@ -46,6 +47,10 @@ function LocalAssetsPage() {
     const addAsset = useAssetStore((state) => state.addAsset);
     const updateAsset = useAssetStore((state) => state.updateAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
+    const assetHydrationStatus = useAssetStore((state) => state.hydrationStatus);
+    const assetHydrationError = useAssetStore((state) => state.hydrationError);
+    const retryAssetHydration = useAssetStore((state) => state.retryHydration);
+    const unresolvedAssetCount = useAssetStore((state) => state.unresolvedAssetIds.length);
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
     const [page, setPage] = useState(1);
@@ -208,6 +213,10 @@ function LocalAssetsPage() {
                     <div className="mx-auto max-w-5xl text-center">
                         <h1 className="text-4xl font-semibold tracking-tight text-stone-950 dark:text-stone-100">{t("assets.title")}</h1>
                         <p className="mt-3 text-sm text-stone-500 dark:text-stone-400">{t("assets.description")}</p>
+                        <div className="text-left">
+                            <StoreHydrationAlert state={{ hydrationStatus: assetHydrationStatus, hydrationError: assetHydrationError, retryHydration: retryAssetHydration }} label="我的资产" />
+                            {unresolvedAssetCount ? <Alert type="warning" showIcon className="my-4" title={`${unresolvedAssetCount} 项素材的文件暂时无法读取，已保留原记录，未做任何修改`} /> : null}
+                        </div>
                     </div>
 
                     <div className="mx-auto mt-8 w-full max-w-2xl">

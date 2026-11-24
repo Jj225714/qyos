@@ -5,6 +5,8 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import { withLocalProxy } from "@/stores/use-config-store";
 import { createImageThumbnail } from "@/lib/image-thumbnail";
+import { protectStorageKey } from "./storage-coordination";
+import { requestStorageMaintenance } from "./storage-gc";
 
 export type UploadedImage = {
     url: string;
@@ -17,8 +19,6 @@ export type UploadedImage = {
 
 const store = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
 const previewStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_previews" });
-const imageLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
-const videoLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
 const objectUrls = new Map<string, string>();
 const previewUrls = new Map<string, string>();
 const previewListeners = new Set<() => void>();
@@ -57,7 +57,7 @@ async function storeImage(blob: Blob, options?: ImageReadOptions): Promise<Uploa
         const meta = await loadImageMeta(url, options);
         if (!meta) throw new Error(i18n.t("common.imageReadFailed"));
         throwIfAborted(options?.signal);
-        await store.setItem(storageKey, blob);
+        await writeProtectedBlob(storageKey, blob);
         throwIfAborted(options?.signal);
         objectUrls.set(storageKey, url);
         await storeImagePreview(storageKey, blob);
@@ -214,8 +214,14 @@ async function deleteImagePreview(storageKey: string) {
     await previewStore.removeItem(storageKey).catch(() => undefined);
 }
 
-async function setImageBlobImpl(storageKey: string, blob: Blob) {
+/** A fresh blob gets a protection marker first, so startup cleanup keeps it even before anything references it. */
+async function writeProtectedBlob(storageKey: string, blob: Blob) {
+    await protectStorageKey(storageKey);
     await store.setItem(storageKey, blob);
+}
+
+async function setImageBlobImpl(storageKey: string, blob: Blob) {
+    await writeProtectedBlob(storageKey, blob);
     await deleteImagePreview(storageKey);
     await storeImagePreview(storageKey, blob);
     const url = URL.createObjectURL(blob);
@@ -248,31 +254,12 @@ async function deleteStoredImagesImpl(keys: Iterable<string>) {
     );
 }
 
+/**
+ * Image AND media cleanup (one pass, see storage-gc.ts): every persisted reference source plus `usedData` and
+ * registered in-memory state; deletes only under the cross-tab protocol and after the grace period.
+ */
 async function cleanupUnusedImagesImpl(usedData: unknown) {
-    const usedKeys = collectImageStorageKeys(usedData);
-    // Include persisted cross-page workbench and commerce references before garbage collection.
-    const appState = localforage.createInstance({ name: "infinite-canvas", storeName: "app_state" });
-    for (const key of ["infinite-canvas:product-white", "infinite-canvas:commerce_store"]) {
-        const value = await appState.getItem<string>(key);
-        if (value) collectImageStorageKeys(JSON.parse(value), usedKeys);
-    }
-    await Promise.all([
-        imageLogStore.iterate((value) => {
-            collectImageStorageKeys(value, usedKeys);
-        }),
-        videoLogStore.iterate((value) => {
-            collectImageStorageKeys(value, usedKeys);
-        }),
-    ]);
-    const unused: string[] = [];
-    await store.iterate((_value, key) => {
-        if (!usedKeys.has(key)) unused.push(key);
-    });
-    const orphanPreviews: string[] = [];
-    await previewStore.iterate((_value, key) => {
-        if (!usedKeys.has(key)) orphanPreviews.push(key);
-    });
-    await Promise.all([deleteStoredImages(unused), ...orphanPreviews.map(deleteImagePreview)]);
+    return requestStorageMaintenance(usedData);
 }
 
 export function collectImageStorageKeys(value: unknown, keys = new Set<string>()) {

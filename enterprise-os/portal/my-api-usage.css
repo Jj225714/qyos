@@ -1,0 +1,7 @@
+body { overflow: auto; }
+.usage-card { box-sizing: border-box; width: min(90%, 42rem); margin: 12vh auto 2rem; padding: clamp(1.25rem, 4vw, 2.5rem); background: #fff; border: 1px solid #d5dfea; border-radius: 1.25rem; color: #15263d; line-height: 1.65; }
+.usage-card h1 { margin: .75rem 0 .5rem; font-size: clamp(1.6rem, 5vw, 2.25rem); }
+.usage-card a { color: #2354a1; text-decoration: underline; }
+.usage-card dl:not([hidden]) { display: grid; grid-template-columns: 1fr auto; gap: .5rem 1rem; }
+.usage-card dd { margin: 0; font-variant-numeric: tabular-nums; }
+.usage-card select { margin-inline-start: .5rem; font: inherit; }

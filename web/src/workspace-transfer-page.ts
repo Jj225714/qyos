@@ -1,5 +1,10 @@
 import { strToU8, zipSync } from "fflate";
 import { decodeArchive, destinationStatus, encodeArchive, hash, restoreWorkspace, snapshotWorkspace, transferHeaders, transferUrl, validatePayload, type MigrationPayload } from "./services/workspace-transfer";
+import { holdTabPresence } from "./services/storage-coordination";
+
+// This page writes the same stores as the app: it may only act after joining the presence group, i.e. after any
+// startup cleanup in another tab finished; app tabs then see it and do not clean up while it is open.
+const presence = holdTabPresence();
 
 const pendingKey = "workspace-transfer-pending";
 const status = document.querySelector<HTMLElement>("#status")!;
@@ -12,6 +17,15 @@ style.textContent =
 document.head.append(style);
 let pending: MigrationPayload | undefined;
 let busy = false;
+input.disabled = exportButton.disabled = retry.disabled = true;
+presence.then(
+    () => {
+        if (!busy) input.disabled = exportButton.disabled = retry.disabled = false;
+    },
+    () => {
+        status.textContent = "无法与其他标签页协调本地存储，请关闭其他标签页后刷新本页。";
+    },
+);
 const fragment = location.hash.slice(1);
 history.replaceState(null, "", location.pathname + location.search);
 try {
@@ -32,6 +46,7 @@ async function run(action: () => Promise<void>) {
     input.disabled = exportButton.disabled = retry.disabled = true;
     retry.hidden = true;
     try {
+        await presence;
         await action();
     } catch (error) {
         status.textContent = error instanceof Error ? error.message : "迁移失败，请重试";

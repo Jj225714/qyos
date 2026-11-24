@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -218,6 +219,8 @@ export default defineConfig({
     ],
     server: { proxy: { [BM_MODEL_GATEWAY_PREFIX]: bmModelGatewayProxy(), [SUB2API_MODEL_GATEWAY_PREFIX]: bmModelGatewayProxy(SUB2API_MODEL_GATEWAY_PREFIX, SUB2API_MODEL_GATEWAY_TARGET) } },
     preview: { proxy: {} },
+    // These two files use node:test, not Vitest; they run with `npm run test:node`.
+    test: { exclude: ["**/node_modules/**", "**/dist/**", "tests/settings-category-model-boundary.test.mjs", "tests/settings-category-model-preservation.test.mjs"] },
     build: { rollupOptions: { input: { main: resolve(webDir, "index.html"), "workspace-transfer": resolve(webDir, "workspace-transfer.html"), "channel-setup": resolve(webDir, "channel-setup.html") } } },
     resolve: {
         alias: {

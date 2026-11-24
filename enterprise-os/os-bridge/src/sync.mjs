@@ -28,24 +28,30 @@ export function createCasdoorSync({ casdoor, provisioner, log = () => {}, maxDis
             if (people.length === 0) throw new Error('Casdoor returned no users; refusing to reconcile');
             const byId = new Map(people.map(person => [String(person.id), person]));
             const accounts = await provisioner.managedAccounts();
-            const plan = accounts.map(({ user, casdoorId }) => {
+            const plan = [];
+            for (const { user, casdoorId } of accounts) {
                 const person = byId.get(casdoorId);
-                const gone = !person || person.isForbidden === true || person.isDeleted === true;
-                return { user, person, gone };
-            });
+                if (!person || person.isForbidden === true || person.isDeleted === true) { plan.push({ user, person, gone: true, reason: 'FORBIDDEN' }); continue; }
+                // Department loss (provisioning.disableWithoutDepartment); "hold" while the directory never loaded.
+                const verdict = provisioner.accountVerdict ? await provisioner.accountVerdict(identityFromCasdoorUser(person)) : { action: 'enable' };
+                plan.push({ user, person, gone: verdict.action === 'disable', hold: verdict.action === 'hold', reason: verdict.reason });
+            }
+            if (plan.some(item => item.hold)) log({ event: 'department_rule_skipped' });
             const toDisable = plan.filter(item => item.gone && item.user.status === 'active');
             // A misconfigured organization (or a partial Casdoor answer) must not switch everyone off.
             if (toDisable.length > minDisableGuard && toDisable.length > accounts.length * maxDisableRatio) {
                 throw new Error(`reconcile would disable ${toDisable.length} of ${accounts.length} accounts; refusing (check casdoor.organization)`);
             }
-            let disabled = 0; let reactivated = 0;
+            let disabled = 0; let reactivated = 0; let disabledNoDepartment = 0;
             for (const item of plan) {
                 try {
-                    if (item.gone) { if ((await provisioner.disableAccount(item.user)).changed) disabled++; }
-                    else if ((await provisioner.reactivateAccount(item.user)).changed) reactivated++;
+                    if (item.hold) continue;
+                    if (item.gone) {
+                        if ((await provisioner.disableAccount(item.user)).changed) { disabled++; if (item.reason === 'NO_DEPARTMENT') disabledNoDepartment++; }
+                    } else if ((await provisioner.reactivateAccount(item.user)).changed) reactivated++;
                 } catch (error) { log({ event: 'reconcile_account_failed', japiUserId: item.user.id, message: error.message }); }
             }
-            lastRun = { at: now(), ms: now() - started, accounts: accounts.length, disabled, reactivated };
+            lastRun = { at: now(), ms: now() - started, accounts: accounts.length, disabled, disabledNoDepartment, reactivated };
             log({ event: 'reconcile_done', ...lastRun });
             return lastRun;
         })().finally(() => { running = null; });

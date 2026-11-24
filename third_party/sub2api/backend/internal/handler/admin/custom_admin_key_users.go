@@ -1,7 +1,10 @@
 package admin
 
 import (
+	"os"
+	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
@@ -10,6 +13,47 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
+
+const qyosBindingPrefix = "os-bridge casdoor:"
+
+var qyosBindingMatch = regexp.MustCompile(`(?:^|[[:space:]])os-bridge casdoor:([^[:space:]]+)`)
+var qyosBindingSubject = regexp.MustCompile(`^[A-Za-z0-9._@/+:-]{1,200}$`)
+var errQyosBindingConflict = infraerrors.Conflict("QYOS_BINDING_CONFLICT", "enterprise binding already exists or is ambiguous")
+
+func isQyosBindingReader(principal *adminaccess.Principal) bool {
+	id := os.Getenv("QYOS_BINDING_READER_KEY_ID")
+	return principal != nil && id != "" && principal.KeyID == id && slices.Contains(principal.Policy.GlobalPermissions, "users.read")
+}
+
+// Never disclose free-form administrator notes to the bridge.
+func qyosBindingProjection(notes string) string {
+	matches := qyosBindingMatch.FindAllStringSubmatch(notes, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	if len(matches) != 1 || !qyosBindingSubject.MatchString(matches[0][1]) {
+		return qyosBindingPrefix + "!invalid-binding!"
+	}
+	return qyosBindingPrefix + matches[0][1]
+}
+
+func mergeQyosBinding(old, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if !strings.HasPrefix(requested, qyosBindingPrefix) || !qyosBindingSubject.MatchString(strings.TrimPrefix(requested, qyosBindingPrefix)) {
+		return "", infraerrors.BadRequest("QYOS_BINDING_INVALID", "invalid enterprise account binding")
+	}
+	switch existing := qyosBindingProjection(old); existing {
+	case requested:
+		return old, nil
+	case "":
+		if old == "" {
+			return requested, nil
+		}
+		return old + "\n" + requested, nil
+	default:
+		return "", errQyosBindingConflict
+	}
+}
 
 // adminUserResponse 对受限密钥使用字段白名单，避免完整管理员 DTO 新增字段时隐式扩大授权。
 // 订阅及用量由各自的独立接口提供，用户资料接口不嵌入这些关联数据。
@@ -34,6 +78,9 @@ func adminUserResponse(c *gin.Context, user *service.User) any {
 		out["created_at"] = user.CreatedAt
 		out["updated_at"] = user.UpdatedAt
 		out["deleted_at"] = user.DeletedAt
+	}
+	if isQyosBindingReader(principal) {
+		out["notes"] = qyosBindingProjection(user.Notes)
 	}
 	if slices.Contains(permissions, "users.balance.read") {
 		out["balance"] = user.Balance

@@ -49,10 +49,10 @@ def settings():
         'clientSecret': _secret('CASDOOR_CLIENT_SECRET'),
         'origin': os.environ.get('JADMIN_ORIGIN', '').rstrip('/'),
         'bridgeToken': _secret('OS_BRIDGE_TOKEN'),
-        # A dedicated Casdoor global administrator's accessKey/accessSecret: only it may update applications.
-        'adminAccessKey': _secret('CASDOOR_ADMIN_ACCESS_KEY'),
-        'adminAccessSecret': _secret('CASDOOR_ADMIN_ACCESS_SECRET'),
-        'apps': [a.strip() for a in os.environ.get('CASDOOR_APPS', 'jchat,jimage,jadmin').split(',') if a.strip()],
+        'adminClientIdFile': os.environ.get('CASDOOR_ADMIN_CLIENT_ID_FILE', ''),
+        'adminClientSecretFile': os.environ.get('CASDOOR_ADMIN_CLIENT_SECRET_FILE', ''),
+        'expectedIssuer': os.environ.get('CASDOOR_EXPECTED_ISSUER', ''),
+        'apps': ['portal', 'jchat', 'jimage', 'japi', 'jadmin'],
         'imProviders': _im_providers(os.environ.get('CASDOOR_IM_PROVIDERS', '')),
     }
 
@@ -74,6 +74,8 @@ def sso_enabled(cfg=None):
 
 
 def init_db(c):
+    import email_confirmation
+    email_confirmation.init_db(c)
     c.execute('create table if not exists departments(code text primary key, name text not null, groups text not null default \'[]\', japi_group_id integer, sort integer not null default 0, updated integer)')
     c.execute('create table if not exists assignments(email text primary key, code text not null, note text, updated integer)')
     c.execute('create table if not exists sso_states(state text primary key, verifier text not null, created integer not null, link_email text)')
@@ -86,6 +88,8 @@ def init_db(c):
     c.execute('create table if not exists sso_links(token text primary key, email text not null, created integer not null)')
     c.execute('create table if not exists enterprise_settings(k text primary key, v text not null, updated integer)')
     c.commit()
+    import login_config
+    login_config.init_db(c)
 
 
 # ---------------------------------------------------------------- departments
@@ -178,6 +182,10 @@ def resolve(departments, assignments, email, groups):
 
 
 def bridge_payload(c, cfg=None):
+    # An authenticated feed request reached Jadmin. This is not acknowledgement
+    # that a consumer accepted the response; that residual risk is shown in UI.
+    c.execute("update login_operations set feed_served_at=? where status='running' and phase='draining' and commit_at is not null and feed_served_at is null", (int(time.time()),))
+    c.commit()
     departments = list_departments(c)
     updated = c.execute('select max(m) from (select max(updated) m from departments union all select max(updated) m from assignments)').fetchone()[0] or 0
     return {
@@ -185,6 +193,7 @@ def bridge_payload(c, cfg=None):
         'departments': [{'code': d['code'], 'name': d['name'], 'groups': d['groups'], 'japiGroupId': d['japiGroupId']} for d in departments],
         'assignments': {r['email']: r['code'] for r in list_assignments(c)},
         'loginProvider': login_provider(c, cfg),
+        'loginStatus': login_status(c),
     }
 
 
@@ -226,7 +235,16 @@ def _mask_phone(phone):
 
 def directory_report(c, users=None):
     """Checks every Casdoor employee: email, phone, duplicates, bound IMs and resolved department."""
+    import employee_email
+    import email_confirmation
     users = casdoor_users() if users is None else users
+    organization = os.environ.get('CASDOOR_ORG', '')
+    completion = (employee_email.AtomicEmailClient().capability() if employee_email.valid_id(organization)
+                  else {'available': False, 'reason': 'organization_unconfigured'})
+    stable_ids = {}
+    for user in users:
+        if isinstance(user, dict) and employee_email.valid_id(user.get('id')):
+            stable_ids[user['id']] = stable_ids.get(user['id'], 0) + 1
     departments = list_departments(c)
     names = {d['code']: d['name'] for d in departments}
     assignments = {r['email']: r['code'] for r in list_assignments(c)}
@@ -259,7 +277,19 @@ def directory_report(c, users=None):
             issues.append('未绑定 IM'); counts['noIm'] += 1
         if not code:
             issues.append('未分配部门'); counts['unassigned'] += 1
+        binding = u.get('dingtalk')
+        eligible_for_confirmation = bool(completion['available'] and u.get('owner') == organization
+            and employee_email.valid_id(u.get('id')) and stable_ids.get(u['id']) == 1
+            and not u.get('isForbidden') and not u.get('isDisabled') and email
+            and u.get('email') == email and len(by_email.get(email, [])) == 1
+            and email_confirmation.valid_binding(binding) and u.get('emailVerified') is not True)
+        work_email_confirmed = eligible_for_confirmation and email_confirmation.stored(c, organization, u['id'], email, binding)
         rows.append({
+            'canConfirmWorkEmail': eligible_for_confirmation and not work_email_confirmed,
+            'workEmailConfirmed': work_email_confirmed,
+            'id': u.get('id') if employee_email.valid_id(u.get('id')) else None,
+            'canCompleteEmail': bool(completion['available'] and employee_email.eligible(u, organization)
+                                     and stable_ids.get(u.get('id')) == 1),
             'name': u.get('name'), 'displayName': u.get('displayName') or u.get('name'),
             'email': email, 'phone': _mask_phone(phone), 'groups': groups, 'im': bound,
             'department': code, 'departmentName': names.get(code, ''),
@@ -267,7 +297,7 @@ def directory_report(c, users=None):
             'forbidden': bool(u.get('isForbidden')), 'issues': issues,
         })
     rows.sort(key=lambda r: (not r['issues'], r['departmentName'] or '~', r['displayName'] or ''))
-    return {'total': len(rows), 'ready': sum(1 for r in rows if not r['issues']), 'counts': counts, 'users': rows}
+    return {'total': len(rows), 'ready': sum(1 for r in rows if not r['issues']), 'counts': counts, 'users': rows, 'emailCompletion': completion}
 
 
 # ---------------------------------------------------------------- login IM (one of Lark / WeCom / DingTalk)
@@ -288,9 +318,38 @@ def set_login_im(c, im):
     c.commit()
 
 
+def login_status(c):
+    """Read only proven current activation; never promote the legacy default."""
+    import login_config
+    unknown = {'state': 'unknown'}
+    if c.execute("select 1 from login_operations where status='running' limit 1").fetchone():
+        return unknown
+    if login_config.get(c, 'login_state') != 'consistent':
+        return unknown
+    if login_config.get(c, 'login_detached') == '1':
+        return {'state': 'detached'}
+    active = login_config.get(c, 'active_revision_id')
+    if not active:
+        return unknown
+    row = c.execute('select * from login_provider_revisions where id=?', (active,)).fetchone()
+    if (not row or row['role'] != 'active' or row['im'] not in IM_TYPES
+            or row['im'] != login_config.get(c, 'login_im')
+            or row['cred_test_status'] != 'passed' or row['signin_test_status'] != 'passed'):
+        return unknown
+    return {'state': 'active', 'type': row['im'], 'name': row['casdoor_name']}
+
+
 def login_provider(c, cfg=None):
     cfg = cfg or settings()
     im = get_login_im(c)
+    import login_config
+    if login_config.get(c, 'login_detached') == '1':
+        return {'type': im, 'name': None}
+    active = login_config.get(c, 'active_revision_id')
+    if active:
+        row = c.execute('select im,casdoor_name from login_provider_revisions where id=?', (active,)).fetchone()
+        if row:
+            return {'type': row['im'], 'name': row['casdoor_name']}
     return {'type': im, 'name': cfg['imProviders'][im]}
 
 
@@ -301,27 +360,16 @@ def binding_rule(im):
 
 
 def admin_api_configured(cfg=None):
-    cfg = cfg or settings()
-    return bool(cfg['casdoorUrl'] and cfg['adminAccessKey'] and cfg['adminAccessSecret'])
-
-
-def _admin_call(cfg, path, params, body=None):
-    query = urllib.parse.urlencode(dict(params, accessKey=cfg['adminAccessKey'], accessSecret=cfg['adminAccessSecret']))
-    data = json.dumps(body).encode() if body is not None else None
-    headers = {'Accept': 'application/json'}
-    if data is not None:
-        headers['Content-Type'] = 'application/json'
-    result = _http_json(cfg['casdoorUrl'] + path + '?' + query, headers, data)
-    if not isinstance(result, dict) or result.get('status') != 'ok':
-        raise EnterpriseError('Casdoor 拒绝请求：%s' % ((result.get('msg') or '未知原因') if isinstance(result, dict) else '格式错误'), 502)
-    return result
+    from casdoor_admin import AdminClient
+    return AdminClient(cfg or settings()).configured()
 
 
 def get_application(cfg, app):
-    data = _admin_call(cfg, '/api/get-application', {'id': 'admin/' + app}).get('data')
-    if not isinstance(data, dict) or not isinstance(data.get('providers') or [], list):
-        raise EnterpriseError('Casdoor 中找不到应用 %s' % app, 404)
-    return data
+    from casdoor_admin import AdminClient, AdminError
+    try:
+        return AdminClient(cfg).get_application(app)
+    except AdminError as e:
+        raise EnterpriseError(e.code, e.status, {'code': e.code}) from None
 
 
 def _is_im_item(item, names):
@@ -360,41 +408,6 @@ def build_providers(data, im, cfg):
     return out
 
 
-def sync_login_im(c, cfg=None):
-    """Writes the chosen IM into every application's providers (columns=providers). One result per application."""
-    cfg = cfg or settings()
-    im = get_login_im(c)
-    results = []
-    for app in cfg['apps']:
-        try:
-            data = get_application(cfg, app)
-            # A non-global-admin gets a masked application (secret "***", Email/SMS items stripped); writing that
-            # back would delete provider items, so stop here instead.
-            if data.get('clientSecret') == '***':
-                raise EnterpriseError('管理凭据不是 Casdoor 全局管理员（应用信息被脱敏），已停止同步该应用', 403)
-            data['providers'] = build_providers(data, im, cfg)
-            _admin_call(cfg, '/api/update-application', {'id': 'admin/' + app, 'columns': 'providers'}, data)
-            results.append({'app': app, 'ok': True})
-        except EnterpriseError as e:
-            results.append({'app': app, 'ok': False, 'error': str(e)})
-    return results
-
-
-def manual_steps(im, cfg=None):
-    cfg = cfg or settings()
-    name = cfg['imProviders'][im]
-    others = '、'.join(v for k, v in cfg['imProviders'].items() if k != im)
-    steps = [
-        '登录 Casdoor 管理后台，依次打开应用：%s。' % '、'.join(cfg['apps']),
-        '在每个应用的「提供商」列表中删除 %s，只保留 %s（验证码等非 IM 提供商不动）。' % (others, name),
-        '%s 一项设置：可注册、可登录、不可解绑、不提示（prompted 关）、规则 None，绑定规则 %s。' % (name, '、'.join(binding_rule(im))),
-        '确认每个应用都开启了「启用注册」，否则新员工首次登录会失败。',
-    ]
-    if im == 'wecom':
-        steps.append('在 %s 上开启「使用 ID 作为用户名」（UseIdAsName），并确认每位员工的 Casdoor 用户名等于其企业微信 userid。' % name)
-    return steps
-
-
 def wecom_risk(c, users=None):
     """How many employees would be locked out by switching to WeCom (no WeCom bound on their Casdoor user)."""
     try:
@@ -411,65 +424,13 @@ def _option(im, cfg):
 
 
 def login_im_status(c, cfg=None, users=None):
-    cfg = cfg or settings()
-    im = get_login_im(c)
-    expected = cfg['imProviders'][im]
-    apps, notes = [], []
-    if admin_api_configured(cfg):
-        for app in cfg['apps']:
-            try:
-                data = get_application(cfg, app)
-                actual = application_im_items(data, cfg)
-                apps.append({'app': app, 'status': 'ok' if actual == [expected] else 'mismatch', 'providers': actual, 'enableSignUp': bool(data.get('enableSignUp'))})
-                if not data.get('enableSignUp'):
-                    notes.append('应用 %s 未开启注册，新员工首次登录会失败' % app)
-            except EnterpriseError as e:
-                apps.append({'app': app, 'status': 'error', 'error': str(e)})
-        states = {a['status'] for a in apps}
-        overall = 'error' if 'error' in states else ('mismatch' if 'mismatch' in states else 'ok')
-    else:
-        apps = [{'app': app, 'status': 'unknown'} for app in cfg['apps']]
-        overall = 'unknown'
-        notes.append('未配置 CASDOOR_ADMIN_ACCESS_KEY / CASDOOR_ADMIN_ACCESS_SECRET，无法读取或修改 Casdoor 应用，需手动调整')
-    if im == 'wecom':
-        notes.append('企业微信按用户名合并账号：%s 需开启「使用 ID 作为用户名」，员工的 Casdoor 用户名必须等于企业微信 userid' % expected)
-    return {
-        'im': im, 'label': IM_LABELS[im], 'provider': expected,
-        'options': [_option(k, cfg) for k in IM_TYPES],
-        'sync': {'configured': admin_api_configured(cfg), 'status': overall, 'apps': apps},
-        'notes': notes,
-        'wecomRisk': wecom_risk(c, users),
-    }
+    import login_config
+    return login_config.summary(c, cfg)
 
 
 def change_login_im(c, im, confirm=False, cfg=None, users=None):
-    """Saves the login IM and (with admin credentials) updates every application. Returns (result, http status)."""
-    cfg = cfg or settings()
-    im = str(im or '').strip().lower()
-    if im not in IM_TYPES:
-        raise EnterpriseError('登录方式只能是飞书（lark）、企业微信（wecom）或钉钉（dingtalk）')
-    previous = get_login_im(c)
-    risk = None
-    if im == 'wecom' and previous != 'wecom':
-        risk = wecom_risk(c, users)
-        if confirm is not True and (not risk['checked'] or risk['unbound']):
-            message = ('有 %d 名员工尚未绑定企业微信，切换后他们将无法登录。确认后再保存。' % risk['unbound']) if risk['checked'] \
-                else ('无法核对员工的企业微信绑定情况（%s）。确认后再保存。' % risk['error'])
-            raise EnterpriseError(message, 409, {'needConfirm': True, 'wecomRisk': risk})
-    set_login_im(c, im)
-    result = {'im': im, 'label': IM_LABELS[im], 'provider': cfg['imProviders'][im], 'previous': previous, 'saved': True}
-    if risk is not None:
-        result['wecomRisk'] = risk
-    if not admin_api_configured(cfg):
-        result['sync'] = {'configured': False, 'status': 'manual', 'apps': [], 'steps': manual_steps(im, cfg)}
-        return result, 200
-    apps = sync_login_im(c, cfg)
-    failed = [a for a in apps if not a['ok']]
-    result['sync'] = {'configured': True, 'status': 'error' if failed else 'ok', 'apps': apps, 'failed': [a['app'] for a in failed]}
-    if failed:
-        result['error'] = '设置已保存，但以下应用同步到 Casdoor 失败：%s。修复后请重新保存。' % '；'.join('%s（%s）' % (a['app'], a['error']) for a in failed)
-        return result, 502
-    return result, 200
+    import login_config
+    return login_config.dispatch(c, 'legacy_activate', {'im': im, 'confirm': confirm}, 'legacy', cfg), 200
 
 
 # ---------------------------------------------------------------- SSO for Jadmin administrators
@@ -534,11 +495,14 @@ def sso_start(c, cfg=None, link=None):
     if c.execute('select count(*) from sso_states').fetchone()[0] > 1000:
         raise EnterpriseError('登录请求过多，请稍后再试', 429)
     link_email = consume_link(c, link) if link is not None else None
-    c.execute('insert into sso_states(state,verifier,created,link_email) values(?,?,?,?)', (_hash(state), verifier, now, link_email))
+    c.execute('insert into sso_states(state,verifier,created,link_email,purpose) values(?,?,?,?,?)', (_hash(state), verifier, now, link_email, 'link' if link_email else 'login'))
     c.commit()
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
     # provider_hint makes Casdoor go straight to the chosen IM instead of showing its own login page.
-    query = urllib.parse.urlencode({'response_type': 'code', 'client_id': cfg['clientId'], 'redirect_uri': _redirect_uri(cfg), 'scope': 'openid profile email', 'state': state, 'code_challenge': challenge, 'code_challenge_method': 'S256', 'provider_hint': login_provider(c, cfg)['name']})
+    params = {'response_type': 'code', 'client_id': cfg['clientId'], 'redirect_uri': _redirect_uri(cfg), 'scope': 'openid profile email', 'state': state, 'code_challenge': challenge, 'code_challenge_method': 'S256'}
+    if login_provider(c, cfg)['name'] is not None:
+        params['provider_hint'] = login_provider(c, cfg)['name']
+    query = urllib.parse.urlencode(params)
     cookie = '%s=%s; Path=/api/sso; HttpOnly; Secure; SameSite=Lax; Max-Age=%d' % (STATE_COOKIE, state, STATE_SECONDS)
     return endpoints['authorization_endpoint'] + ('&' if '?' in endpoints['authorization_endpoint'] else '?') + query, cookie
 
@@ -589,7 +553,7 @@ def unlink(c, email):
     return removed
 
 
-def sso_finish(c, query, state_cookie, cfg=None):
+def sso_finish(c, query, state_cookie, cfg=None, owner_checker=None, session_epoch=None, session_key=None):
     """Completes the OIDC login.
 
     Returns {'email': administrator email, 'linked': bool}. In the link flow the email is the administrator who
@@ -600,6 +564,11 @@ def sso_finish(c, query, state_cookie, cfg=None):
         raise EnterpriseError('未启用企业登录', 404)
     params = urllib.parse.parse_qs(query or '')
     state = (params.get('state') or [''])[0]
+    test_row = c.execute('select purpose from sso_states where state=?', (_hash(state),)).fetchone() if state else None
+    if test_row and test_row['purpose'] == 'login_test':
+        import login_config
+        epoch = session_epoch or (_hash(session_key) if session_key else None)
+        return login_config.Service(c, cfg, owner_checker=owner_checker).finish_test(query, state_cookie, epoch)
     code = (params.get('code') or [''])[0]
     if not state or not code or len(code) > 4096 or not state_cookie or not hmac.compare_digest(state, state_cookie):
         raise EnterpriseError('登录状态无效，请重新登录', 401)

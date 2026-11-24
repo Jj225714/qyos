@@ -1,32 +1,12 @@
 import { registerNodeDefinitions, unregisterPluginNodes } from "@/lib/canvas/node-registry";
 import { getPluginRuntime } from "@/lib/canvas/plugin-runtime";
+import { evaluatePluginSource } from "@/lib/canvas/plugin-evaluate";
+import { decideTrust, localPluginPath, officialLockEntry, sha256Hex, type TrustResult } from "@/lib/canvas/plugin-integrity";
 import { usePluginStore, type InstalledPlugin } from "@/stores/canvas/use-plugin-store";
 import type { CanvasPlugin } from "@/types/canvas-plugin";
 import i18n from "@/i18n";
 
 const cleanups = new Map<string, () => void>();
-
-// A remote plugin may export CanvasPlugin directly or a factory that receives runtime and returns CanvasPlugin.
-// The factory uses runtime.React so the bundle does not need its own React copy.
-async function evaluatePluginSource(source: string): Promise<CanvasPlugin> {
-    const blob = new Blob([source], { type: "text/javascript" });
-    const url = URL.createObjectURL(blob);
-    try {
-        const mod = (await import(/* @vite-ignore */ url)) as { default?: unknown; plugin?: unknown };
-        const exported = mod.default ?? mod.plugin;
-        const plugin = typeof exported === "function" ? (exported as (runtime: unknown) => unknown)(getPluginRuntime()) : exported;
-        assertPlugin(plugin);
-        return plugin;
-    } finally {
-        URL.revokeObjectURL(url);
-    }
-}
-
-function assertPlugin(plugin: unknown): asserts plugin is CanvasPlugin {
-    const value = plugin as Partial<CanvasPlugin> | null;
-    if (!value || typeof value !== "object") throw new Error(i18n.t("canvas.pluginErrors.invalidExport"));
-    if (!value.id || !Array.isArray(value.nodes) || !value.nodes.length) throw new Error(i18n.t("canvas.pluginErrors.missingFields"));
-}
 
 export function activatePlugin(plugin: CanvasPlugin) {
     registerNodeDefinitions(plugin.nodes, plugin.id);
@@ -51,59 +31,146 @@ async function fetchPluginSource(url: string) {
     return response.text();
 }
 
+/**
+ * Same-origin local files (manifest and bundles): redirects are refused and the effective response URL must still
+ * be the approved same-origin path, so a redirect to other code can never be run as a "local" plugin.
+ */
+async function fetchLocalFile(path: string, init: RequestInit = {}) {
+    const response = await fetch(withCacheBust(path), { ...init, redirect: "error" });
+    if (response.redirected || (response.url && localPluginPathOrManifest(response.url) !== path)) throw new Error("本地插件请求被重定向，已阻止");
+    if (!response.ok) throw new Error(i18n.t("canvas.pluginErrors.downloadFailed", { status: response.status }));
+    return response;
+}
+
+function localPluginPathOrManifest(url: string) {
+    try {
+        const parsed = new URL(url, globalThis.location?.origin);
+        if (parsed.origin !== globalThis.location?.origin) return null;
+        return parsed.pathname === "/plugins/index.json" ? parsed.pathname : localPluginPath(parsed.href);
+    } catch {
+        return null;
+    }
+}
+
 // Add a cache-busting parameter so watch builds load the latest output.
 function withCacheBust(url: string) {
     return `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
 }
 
-// Install or replace a plugin from a URL and enable it immediately.
-// bustCache bypasses HTTP/CDN caches during upgrades while persisting a clean URL without the timestamp query.
-export async function installPluginFromUrl(url: string, opts?: { official?: boolean; bustCache?: boolean }) {
-    const source = await fetchPluginSource(opts?.bustCache ? withCacheBust(url) : url);
+const BLOCK_MESSAGES: Record<Exclude<TrustResult, { ok: true }>["reason"], string> = {
+    tampered: "插件代码与已确认的版本不一致，已阻止运行",
+    unverified: "插件尚未确认信任，已阻止运行；请在插件管理中核对哈希后确认，或重新安装",
+    "not-in-lock": "官方插件校验失败（不在当前应用版本登记的哈希中），已阻止运行",
+    "local-not-approved": "本地插件不在本站 /plugins 目录清单中，已阻止运行",
+};
+
+export function blockMessage(reason: keyof typeof BLOCK_MESSAGES) {
+    return BLOCK_MESSAGES[reason];
+}
+
+/** Same-origin local plugin paths published by this site (/plugins/index.json), read fresh. */
+async function approvedLocalPaths() {
+    try {
+        const response = await fetchLocalFile("/plugins/index.json", { cache: "no-store" });
+        const urls = (await response.json()) as unknown;
+        return new Set((Array.isArray(urls) ? urls : []).map((url) => (typeof url === "string" ? localPluginPath(url) : null)).filter((path): path is string => Boolean(path)));
+    } catch {
+        return new Set<string>();
+    }
+}
+
+/** The only path to execution for installed records: fetch (local) or cached bytes, verify, then evaluate exactly them. */
+async function verifiedPluginFor(record: InstalledPlugin, approved?: Set<string>) {
+    const local = record.local ? localPluginPath(record.url) : null;
+    const source = local ? await (await fetchLocalFile(local)).text() : record.source;
+    const decision = await decideTrust(record, source, record.local ? approved || (await approvedLocalPaths()) : undefined);
+    if (!decision.ok) {
+        usePluginStore.getState().setBlocked(record.id, decision.reason);
+        throw new Error(BLOCK_MESSAGES[decision.reason]);
+    }
     const plugin = await evaluatePluginSource(source);
-    deactivatePlugin(plugin.id); // Replace the previous version.
-    usePluginStore.getState().upsert({ id: plugin.id, name: plugin.name || plugin.id, version: plugin.version || "0.0.0", description: plugin.description, url, source, enabled: true, official: opts?.official });
+    if (plugin.id !== record.id) throw new Error("插件代码声明的 id 与已安装记录不一致，已阻止运行");
+    usePluginStore.getState().setBlocked(record.id);
+    return plugin;
+}
+
+/** Official install/update: the downloaded bytes must match the lock compiled into this app before they run. */
+export async function installOfficialPlugin(entry: { id: string; url: string }) {
+    const source = await fetchPluginSource(withCacheBust(entry.url));
+    const lockEntry = officialLockEntry(entry.id, await sha256Hex(source));
+    if (!lockEntry) throw new Error(BLOCK_MESSAGES["not-in-lock"]);
+    const plugin = await evaluatePluginSource(source);
+    if (plugin.id !== entry.id) throw new Error("插件代码声明的 id 与官方清单不一致，已阻止运行");
+    deactivatePlugin(plugin.id);
+    usePluginStore.getState().upsert({ id: plugin.id, name: plugin.name || plugin.id, version: lockEntry.version, description: plugin.description, url: entry.url, source, enabled: true, official: true });
+    usePluginStore.getState().setBlocked(plugin.id);
     activatePlugin(plugin);
     return plugin;
 }
 
-export async function updatePlugin(record: InstalledPlugin) {
-    // Upgrades must fetch the latest output and therefore always bypass caches.
-    return installPluginFromUrl(record.url, { official: record.official, bustCache: true });
+export type PluginReview = { url: string; source: string; sha256: string; bytes: number };
+
+/** Downloads third-party code for review WITHOUT running it. */
+export async function reviewPluginUrl(url: string): Promise<PluginReview> {
+    const source = await fetchPluginSource(url);
+    return { url, source, sha256: await sha256Hex(source), bytes: new TextEncoder().encode(source).length };
+}
+
+/** Runs and stores exactly the bytes the user confirmed (the hash is recomputed; nothing is fetched again). */
+export async function installReviewedPlugin(review: PluginReview, confirmedSha256: string) {
+    const sha256 = await sha256Hex(review.source);
+    if (sha256 !== confirmedSha256 || sha256 !== review.sha256) throw new Error("待安装的代码与已核对的哈希不一致，已取消安装");
+    const plugin = await evaluatePluginSource(review.source);
+    deactivatePlugin(plugin.id);
+    usePluginStore.getState().upsert({ id: plugin.id, name: plugin.name || plugin.id, version: plugin.version || "0.0.0", description: plugin.description, url: review.url, source: review.source, enabled: true, trust: { kind: "user", sha256, trustedAt: new Date().toISOString() } });
+    usePluginStore.getState().setBlocked(plugin.id);
+    activatePlugin(plugin);
+    return plugin;
+}
+
+/** Explicitly trusts the cached bytes of an installed record (legacy installs), after the user saw their hash. */
+export async function trustInstalledPlugin(record: InstalledPlugin, confirmedSha256: string) {
+    const sha256 = await sha256Hex(record.source);
+    if (sha256 !== confirmedSha256) throw new Error("插件代码与已核对的哈希不一致，未信任");
+    const trusted: InstalledPlugin = { ...record, trust: { kind: "user", sha256, trustedAt: new Date().toISOString() } };
+    const plugin = await verifiedPluginFor(trusted);
+    deactivatePlugin(record.id);
+    usePluginStore.getState().upsert({ ...trusted, enabled: true });
+    activatePlugin(plugin);
+    return plugin;
 }
 
 export async function setPluginEnabled(record: InstalledPlugin, enabled: boolean) {
-    usePluginStore.getState().setEnabled(record.id, enabled);
     if (!enabled) {
+        usePluginStore.getState().setEnabled(record.id, false);
         deactivatePlugin(record.id);
         return;
     }
-    // Reload local plugins from their URL when enabled because the cached source may be stale.
-    const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;
-    const plugin = await evaluatePluginSource(source);
+    const plugin = await verifiedPluginFor(record);
+    usePluginStore.getState().setEnabled(record.id, true);
     activatePlugin(plugin);
 }
 
 export function uninstallPlugin(id: string) {
     deactivatePlugin(id);
     usePluginStore.getState().remove(id);
+    usePluginStore.getState().setBlocked(id);
 }
 
 let loaded = false;
 
-// Load installed and enabled plugins at application startup.
+// Load installed and enabled plugins at application startup; every record is verified before it runs.
 export async function ensurePluginsLoaded() {
     if (loaded) return;
     loaded = true;
     await usePluginStore.persist.rehydrate();
-    await loadLocalPlugins(); // Discover disabled local plugins first, then activate all enabled records.
+    const approved = await approvedLocalPaths();
+    await loadLocalPlugins(approved); // Discover disabled local plugins first, then activate all enabled records.
     const records = usePluginStore.getState().plugins.filter((record) => record.enabled);
     await Promise.all(
         records.map(async (record) => {
             try {
-                // Local plugins use the latest output; other plugins use their cached source.
-                const source = record.local ? await fetchPluginSource(withCacheBust(record.url)) : record.source;
-                activatePlugin(await evaluatePluginSource(source));
+                activatePlugin(await verifiedPluginFor(record, approved));
             } catch (error) {
                 console.error(`[plugin] Failed to load: ${record.id}`, error);
             }
@@ -112,45 +179,30 @@ export async function ensurePluginsLoaded() {
     await loadDevPlugins();
 }
 
-// Discover local plugins from web/public/plugins, add them disabled, and expose them in the manager without a URL.
-// Refresh metadata and source for existing records while preserving the enabled flag so persisted versions stay current.
-async function loadLocalPlugins() {
-    let urls: unknown;
-    try {
-        const response = await fetch("/plugins/index.json");
-        if (!response.ok) return;
-        urls = await response.json();
-    } catch {
-        return; // Skip when no local manifest exists, such as production builds without plugins.
-    }
-    if (!Array.isArray(urls) || !urls.length) return;
+// Discover local plugins from this site's /plugins/index.json, add them disabled, and expose them in the manager.
+// Same-origin files deployed with the app; enabled state is preserved, other persisted fields are refreshed.
+async function loadLocalPlugins(approved: Set<string>) {
+    if (!approved.size) return;
     const store = usePluginStore.getState();
     await Promise.all(
-        urls.map(async (url: string) => {
+        [...approved].map(async (path) => {
             try {
-                const source = await fetchPluginSource(withCacheBust(url));
+                const source = await (await fetchLocalFile(path)).text();
                 const plugin = await evaluatePluginSource(source);
                 const existing = store.plugins.find((item) => item.id === plugin.id);
-                store.upsert({
-                    id: plugin.id,
-                    name: plugin.name || plugin.id,
-                    version: plugin.version || "0.0.0",
-                    description: plugin.description,
-                    url,
-                    source,
-                    enabled: existing?.enabled ?? false, // Preserve the user setting; new discoveries default to disabled.
-                    local: true,
-                });
+                // Never let a discovered local file take over an official or third-party record with the same id.
+                if (existing && !existing.local) return;
+                store.upsert({ id: plugin.id, name: plugin.name || plugin.id, version: plugin.version || "0.0.0", description: plugin.description, url: path, source, enabled: existing?.enabled ?? false, local: true });
             } catch (error) {
-                console.error(`[plugin] Failed to discover local plugin: ${url}`, error);
+                console.error(`[plugin] Failed to discover local plugin: ${path}`, error);
             }
         }),
     );
 }
 
-// During local development, refetch VITE_DEV_PLUGINS URLs without caching or persistence on every startup.
-// Together with watch builds, refreshing the page loads code changes without reinstalling the plugin.
+// During local development only, refetch VITE_DEV_PLUGINS URLs without caching or persistence on every startup.
 async function loadDevPlugins() {
+    if (!import.meta.env.DEV) return;
     const raw = import.meta.env.VITE_DEV_PLUGINS;
     if (!raw) return;
     const urls = raw.split(",").map((item) => item.trim()).filter(Boolean);
@@ -167,4 +219,10 @@ async function loadDevPlugins() {
             }
         }),
     );
+}
+
+/** Test hook. */
+export function resetPluginLoaderForTests() {
+    loaded = false;
+    cleanups.clear();
 }

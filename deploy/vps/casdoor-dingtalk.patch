@@ -1,0 +1,123 @@
+diff --git a/controllers/auth.go b/controllers/auth.go
+index ef18c8fd725a7ae01543e701b052d7829c15ed87..4f49023b0df53a761c7d8cbbee669e2773c2536c 100644
+--- a/controllers/auth.go
++++ b/controllers/auth.go
+@@ -150,6 +150,10 @@ func (c *ApiController) getAuthTime() int64 {
+ 
+ // HandleLoggedIn ...
+ func (c *ApiController) HandleLoggedIn(application *object.Application, user *object.User, form *form.AuthForm) (resp *Response) {
++	return c.handleLoggedIn(application, user, form, nil)
++}
++
++func (c *ApiController) handleLoggedIn(application *object.Application, user *object.User, form *form.AuthForm, dingTalk *object.QyosDingTalkLogin) (resp *Response) {
+ 	_, span := c.traceStep("signin.issue", attribute.String("casdoor.application", application.Name), attribute.String("casdoor.user", user.GetId()))
+ 	defer span.End()
+ 
+@@ -254,7 +258,10 @@ func (c *ApiController) HandleLoggedIn(application *object.Application, user *ob
+ 		if consentRequired {
+ 			resp = &Response{Status: "ok", Data: map[string]bool{"required": true}}
+ 		} else {
+-			code, err := object.GetOAuthCode(userId, clientId, form.Provider, form.SigninMethod, form.Type, redirectUri, scope, state, nonce, codeChallenge, resource, c.Ctx.Input.CruSession.SessionID(context.Background()), authTime, c.Ctx.Request.Host, c.GetAcceptLanguage())
++			if clientId != application.ClientId || !responseType.IsCodeOnly() || challengeMethod != "S256" || nonce == "" || codeChallenge == "" {
++				dingTalk = nil
++			}
++			code, err := object.GetOAuthCode(userId, clientId, form.Provider, form.SigninMethod, form.Type, redirectUri, scope, state, nonce, codeChallenge, resource, c.Ctx.Input.CruSession.SessionID(context.Background()), authTime, c.Ctx.Request.Host, c.GetAcceptLanguage(), dingTalk)
+ 			if err != nil {
+ 				c.ResponseError(err.Error(), nil)
+ 				return
+@@ -1223,6 +1230,12 @@ func (c *ApiController) Login() {
+ 			}
+ 
+ 			if user != nil && !user.IsDeleted {
++				var dingTalk *object.QyosDingTalkLogin
++				// ProviderHintRedirect uses "signup" for SSO, even for existing users.
++				// The verified provider exchange and existing binding are the proof.
++				if provider.Category == "OAuth" && provider.Type == "DingTalk" && token != nil && token.Valid() && userInfo.Id != "" && user.DingTalk == userInfo.Id && application.Name == "portal" {
++					dingTalk = &object.QyosDingTalkLogin{Provider: provider.Name, Subject: userInfo.Id}
++				}
+ 				// Sign in via OAuth (want to sign up but already have account)
+ 				// sync info from 3rd-party if possible
+ 				_, err = object.SetUserOAuthProperties(organization, user, provider.Type, userInfo, token, provider.UserMapping)
+@@ -1235,7 +1248,7 @@ func (c *ApiController) Login() {
+ 					return
+ 				}
+ 
+-				resp = c.HandleLoggedIn(application, user, &authForm)
++				resp = c.handleLoggedIn(application, user, &authForm, dingTalk)
+ 
+ 				c.Ctx.Input.SetParam("recordUserId", user.GetId())
+ 			} else if provider.Category == "OAuth" || provider.Category == "SAML" {
+diff --git a/object/token_jwt.go b/object/token_jwt.go
+index 6e4aaa51ee8a2224055ff360880a6ef8384b69ef..f1ad6d2311200fc71db47f686aad5825a0cc5ee1 100644
+--- a/object/token_jwt.go
++++ b/object/token_jwt.go
+@@ -49,7 +49,13 @@ type ActClaim struct {
+ 	Act      *ActClaim `json:"act,omitempty"`
+ }
+ 
++type QyosDingTalkLogin struct {
++	Provider string `json:"provider"`
++	Subject  string `json:"subject"`
++}
++
+ type Claims struct {
++	QyosDingTalk *QyosDingTalkLogin `json:"qyos_dingtalk_login,omitempty"`
+ 	*User
+ 	TokenType string `json:"tokenType,omitempty"`
+ 	Nonce     string `json:"nonce,omitempty"`
+@@ -195,6 +201,7 @@ type OIDCAddress struct {
+ }
+ 
+ type ClaimsWithoutThirdIdp struct {
++	QyosDingTalk *QyosDingTalkLogin `json:"qyos_dingtalk_login,omitempty"`
+ 	*UserWithoutThirdIdp
+ 	TokenType string            `json:"tokenType,omitempty"`
+ 	Nonce     string            `json:"nonce,omitempty"`
+@@ -349,6 +356,7 @@ func getShortClaims(claims Claims) ClaimsShort {
+ 
+ func getClaimsWithoutThirdIdp(claims Claims) ClaimsWithoutThirdIdp {
+ 	res := ClaimsWithoutThirdIdp{
++		QyosDingTalk:        claims.QyosDingTalk,
+ 		UserWithoutThirdIdp: getUserWithoutThirdIdp(claims.User),
+ 		TokenType:           claims.TokenType,
+ 		Nonce:               claims.Nonce,
+@@ -615,6 +623,7 @@ func getTokenUser(application *Application, user *User) (*User, error) {
+ 
+ // jwtTokenOptions carries what the ID token has to say about the authorization request
+ type jwtTokenOptions struct {
++	QyosDingTalk *QyosDingTalkLogin
+ 	// AuthTime is when the user last entered credentials, 0 if unknown
+ 	AuthTime int64
+ 	// Code is the authorization code returned together with the ID token, for its c_hash
+@@ -724,6 +733,8 @@ func generateJwtTokenWithOptions(application *Application, user *User, provider
+ 
+ 	// RFC 6749 section 6: the refresh token keeps the scope of the grant
+ 	refreshClaims := claims
++	// This marker is scoped to the original portal access token, never a refresh or ID token.
++	claims.QyosDingTalk = options.QyosDingTalk
+ 	refreshClaims.TokenType = "refresh-token"
+ 	refreshClaims.ExpiresAt = jwt.NewNumericDate(refreshExpireTime)
+ 	if options.RefreshScope != "" {
+diff --git a/object/token_oauth_util.go b/object/token_oauth_util.go
+index 63f6991f01996064ee11ba5ede647f1b58879de4..99ea7bc66a8f238caf6ceb220921e75ecf9480bd 100644
+--- a/object/token_oauth_util.go
++++ b/object/token_oauth_util.go
+@@ -445,7 +445,7 @@ func checkOAuthCodeUser(user *User, application *Application, lang string) (stri
+ 	return "", nil
+ }
+ 
+-func GetOAuthCode(userId string, clientId string, provider string, signinMethod string, responseType string, redirectUri string, scope string, state string, nonce string, challenge string, resource string, sessionId string, authTime int64, host string, lang string) (*Code, error) {
++func GetOAuthCode(userId string, clientId string, provider string, signinMethod string, responseType string, redirectUri string, scope string, state string, nonce string, challenge string, resource string, sessionId string, authTime int64, host string, lang string, dingTalk ...*QyosDingTalkLogin) (*Code, error) {
+ 	user, err := GetUser(userId)
+ 	if err != nil {
+ 		return nil, err
+@@ -516,6 +516,9 @@ func GetOAuthCode(userId string, clientId string, provider string, signinMethod
+ 	rt, _ := ParseResponseType(responseType)
+ 	code := util.GenerateAuthorizationCode()
+ 	options := jwtTokenOptions{AuthTime: authTime, WithAtHash: rt.IsCodeOnly() || rt.Token, SessionId: sessionId}
++	if len(dingTalk) == 1 && dingTalk[0] != nil && rt.IsCodeOnly() && application.Name == "portal" && user.DingTalk == dingTalk[0].Subject && user.DingTalk != "" {
++		options.QyosDingTalk = dingTalk[0]
++	}
+ 	if rt.IdToken {
+ 		options.Code = code
+ 	}

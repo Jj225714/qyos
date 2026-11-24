@@ -38,6 +38,12 @@ node admin-users.mjs --file /private/config-vault-admins.json --action revoke --
 - Casdoor 中 jimage 应用的回调地址填 `https://<站点>/api/config-vault/oidc/callback`。前端运行时配置加 `enterpriseSsoEnabled: true` 后显示登录按钮（可用 `enterpriseSsoLabel` 改文字）。
 - 反向代理需放行 `/api/config-vault/oidc/` 的 GET 顶层跳转（不带 Origin 头），其余规则不变。
 
+### 企业门户（SSO-20261115-05）
+
+- 门户首页的「Jimage」入口直接指向 `/api/config-vault/oidc/start?return=%2Fimage`。这个地址会先结束本浏览器在保险库里的旧会话，再重新发起企业登录。所以换人使用同一台电脑时，进入的一定是当前员工。
+- 建议把 `sessionMaxHours` 调到 **8**，与门户和 Casdoor 会话时长一致。
+- os-bridge 的 `/internal/users/:id` 现在也按部门判断。员工被移出所有部门后，保险库在下一次 60 秒复核时结束其 SSO 会话（服务正常时约 2 分钟内）；`/managed-channel` 取 Key 也会被拒绝。保险库代码无需改动。
+
 ## 接口
 
 - `GET /settings`：schemaVersion=2、当前账号、manageTeam 权限、personal/team；管理员另获 draft。

@@ -114,7 +114,9 @@ test('submission claim blocks cancellation before network and storage failure fa
   s.store.flush = original; await release(); await s.waitForIdle(); assert.equal(f.calls.length, 1);
   const g = await setup(t); const q = g.make(); q.schedule = () => {};
   await q.create(input('disk')); q.store.flush = async () => { throw new Error('disk failure'); };
-  delete q.schedule; q.schedule(); await q.waitForIdle(); assert.equal(g.calls.length, 0); assert.equal(q.stopped, true);
+  // Storage failure fails closed (no submit, admission refused) but is recoverable rather than a permanent stop.
+  delete q.schedule; q.schedule(); await q.waitForIdle(); assert.equal(g.calls.length, 0); assert.equal(q.storageHealthy, false);
+  await assert.rejects(q.create(input('disk-2')), { status: 503 }); assert.equal(g.calls.length, 0);
 });
 
 test('byte cap rejects before admission; expired result retains durable identity', async t => {

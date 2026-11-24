@@ -9,6 +9,7 @@ import { setMediaBlob } from "@/services/file-storage";
 import { setImageBlob } from "@/services/image-storage";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
 import { CanvasProjectCard } from "@/components/canvas/canvas-project-card";
+import { StoreHydrationAlert } from "@/components/storage/store-hydration-alert";
 import type { CanvasExportFile } from "@/types/canvas-export";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
@@ -23,6 +24,9 @@ export default function CanvasPage() {
     const inputRef = useRef<HTMLInputElement>(null);
     const autoOpenRef = useRef(false);
     const hydrated = useCanvasStore((state) => state.hydrated);
+    const hydrationStatus = useCanvasStore((state) => state.hydrationStatus);
+    const hydrationError = useCanvasStore((state) => state.hydrationError);
+    const retryHydration = useCanvasStore((state) => state.retryHydration);
     const projects = useCanvasStore((state) => state.projects);
     const createProject = useCanvasStore((state) => state.createProject);
     const importProject = useCanvasStore((state) => state.importProject);
@@ -39,6 +43,10 @@ export default function CanvasPage() {
     const createAndEnter = () => enterProject(createProject(t("canvas.defaultTitle", { count: projects.length + 1 })));
     const importCanvas = async (file?: File) => {
         if (!file) return;
+        if (!useCanvasStore.getState().hydrated) {
+            message.error("画布数据尚未读取完成，请稍后重试");
+            return;
+        }
         try {
             const zip = await readZip(file);
             const projectFile = zip.get("projects.json");
@@ -104,7 +112,9 @@ export default function CanvasPage() {
                     </div>
                 </header>
 
-                {!hydrated ? (
+                {hydrationStatus === "error" ? (
+                    <StoreHydrationAlert state={{ hydrationStatus, hydrationError, retryHydration }} label="画布" />
+                ) : !hydrated ? (
                     <section className="flex min-h-[360px] items-center justify-center border-y border-stone-200 text-sm text-stone-500 dark:border-stone-800">{t("canvas.loading")}</section>
                 ) : projects.length ? (
                     <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
